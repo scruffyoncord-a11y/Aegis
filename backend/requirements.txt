@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+pydantic
+
+# Needed to import pentestgpt_legacy.llm.factory as a library (see app/llm.py).
+# We only use the Ollama/OpenAI-compatible path, but the module imports every
+# provider connector at load time, so these must all be installed.
+pydantic-settings
+python-dotenv
+prompt-toolkit
+rich
+loguru
+openai
+anthropic
+google-genai
