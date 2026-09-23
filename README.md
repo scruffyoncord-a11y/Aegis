@@ -53,7 +53,30 @@ git clone https://github.com/GreyDGL/PentestGPT.git
 It is excluded from this repo's git history (see `.gitignore`) since it's
 an external MIT-licensed reference dependency, not our code.
 
-### 4. Backend
+### 4. GitHub OAuth App (for "Connect with GitHub")
+
+Aegis proves you own a repo before scanning or probing it by having you
+sign in on GitHub's own login page -- no token is ever typed into Aegis's
+UI. To enable this locally:
+
+1. Go to GitHub -> Settings -> Developer settings -> OAuth Apps -> New OAuth App
+2. Application name: `Aegis (Dev)`
+3. Homepage URL: `http://localhost:3000`
+4. Authorization callback URL: `http://localhost:8000/github/oauth/callback`
+5. Create it, generate a Client Secret, and put both in `backend/.env`
+   (already git-ignored -- never commit this file):
+
+```
+GITHUB_CLIENT_ID=your_client_id
+GITHUB_CLIENT_SECRET=your_client_secret
+```
+
+The access token this produces lives only in the backend's in-memory
+session store (keyed by an httpOnly cookie) -- it's never sent to the
+frontend, logged, or written to disk. See `backend/app/github_oauth.py`
+and `backend/app/github_auth.py` for the exact handling.
+
+### 5. Backend
 
 ```bash
 cd backend
@@ -61,7 +84,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 5. Try it
+### 6. Try it
 
 ```bash
 curl -X POST http://localhost:8000/scan \

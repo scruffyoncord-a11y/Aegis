@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const API = "http://localhost:8000";
 
@@ -155,6 +155,160 @@ function FindingCard({ finding, repoPath }) {
   );
 }
 
+function GitHubConnect({ onConnected }) {
+  const [status, setStatus] = useState({ loading: true, connected: false });
+  const [repoUrl, setRepoUrl] = useState("");
+  const [cloning, setCloning] = useState(false);
+  const [error, setError] = useState(null);
+  const [cloned, setCloned] = useState(null);
+
+  async function refreshStatus() {
+    try {
+      const res = await fetch(`${API}/github/session`, {
+        credentials: "include",
+      });
+      const data = await res.json();
+      setStatus({ loading: false, ...data });
+    } catch {
+      setStatus({ loading: false, connected: false });
+    }
+  }
+
+  useEffect(() => {
+    refreshStatus();
+  }, []);
+
+  async function handleLogout() {
+    await fetch(`${API}/github/logout`, {
+      method: "POST",
+      credentials: "include",
+    });
+    setCloned(null);
+    refreshStatus();
+  }
+
+  async function handleClone() {
+    setCloning(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API}/github/verify-and-clone`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo_url: repoUrl }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      setCloned(data);
+      onConnected(data.repo_path);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCloning(false);
+    }
+  }
+
+  return (
+    <div
+      style={{
+        background: "#1e293b",
+        border: "1px solid #334155",
+        borderRadius: 8,
+        padding: 16,
+        marginBottom: 20,
+      }}
+    >
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+        Connect a GitHub repo
+      </div>
+      <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 10 }}>
+        Aegis only scans repos you can prove you control. You sign in
+        directly on GitHub -- your access token stays on the Aegis backend
+        and is never sent to or stored by this page.
+      </div>
+
+      {status.loading ? null : !status.connected ? (
+        <a
+          href={`${API}/github/oauth/login`}
+          style={{
+            display: "inline-block",
+            background: "#24292f",
+            color: "#fff",
+            border: "1px solid #444c56",
+            borderRadius: 6,
+            padding: "8px 16px",
+            fontSize: 13,
+            fontWeight: 600,
+            textDecoration: "none",
+          }}
+        >
+          Connect with GitHub
+        </a>
+      ) : (
+        <>
+          <p style={{ color: "#22c55e", fontSize: 13, marginTop: 0 }}>
+            Signed in as {status.github_login}{" "}
+            <button
+              onClick={handleLogout}
+              style={{
+                background: "none",
+                border: "none",
+                color: "#94a3b8",
+                fontSize: 12,
+                textDecoration: "underline",
+                cursor: "pointer",
+              }}
+            >
+              disconnect
+            </button>
+          </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              value={repoUrl}
+              onChange={(e) => setRepoUrl(e.target.value)}
+              placeholder="owner/repo or github.com/owner/repo"
+              style={{
+                flex: 1,
+                background: "#0b1120",
+                border: "1px solid #334155",
+                borderRadius: 6,
+                padding: "8px 12px",
+                color: "#e5e7eb",
+                fontSize: 13,
+              }}
+            />
+            <button
+              onClick={handleClone}
+              disabled={cloning || !repoUrl}
+              style={{
+                background: "#22c55e",
+                color: "#0b1120",
+                border: "none",
+                borderRadius: 6,
+                padding: "8px 16px",
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: cloning ? "default" : "pointer",
+                opacity: cloning || !repoUrl ? 0.5 : 1,
+              }}
+            >
+              {cloning ? "Verifying..." : "Verify & Clone"}
+            </button>
+          </div>
+        </>
+      )}
+
+      {error && <p style={{ color: "#ef4444", fontSize: 13 }}>{error}</p>}
+      {cloned && (
+        <p style={{ color: "#22c55e", fontSize: 13, marginBottom: 0 }}>
+          Verified -- {cloned.owner}/{cloned.repo} ({cloned.permission} access
+          {cloned.private ? ", private" : ""})
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function Home() {
   const [repoPath, setRepoPath] = useState("../demo-app");
   const [scanning, setScanning] = useState(false);
@@ -192,6 +346,8 @@ export default function Home() {
       <p style={{ color: "#94a3b8", marginTop: 0, marginBottom: 24 }}>
         AI pentesting agent -- Observe &rarr; Detect &rarr; Explain &rarr; Respond
       </p>
+
+      <GitHubConnect onConnected={(path) => setRepoPath(path)} />
 
       <div style={{ display: "flex", gap: 8, marginBottom: 24 }}>
         <input
