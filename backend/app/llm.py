@@ -37,6 +37,7 @@ def explain_finding(finding: dict) -> str:
         f"File: {finding.get('file')}\n"
         f"Rule: {finding.get('rule')}\n"
         f"Matched text (redact if sensitive): {finding.get('match')}\n"
+        f"Details: {finding.get('detail', '')}\n"
     )
 
     response, _conversation_id = client.send_new_message(prompt)

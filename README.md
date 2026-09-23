@@ -14,13 +14,16 @@ Track: ASYNC 2026 — Cybersecurity & Defense.
 OBSERVE  ->  DETECT  ->  EXPLAIN  ->  RESPOND
 ```
 
-## Status: Phase 1 (in progress)
+## Status: Phases 1-3 complete (detect -> explain -> fix -> re-verify)
 
-- [x] Secrets detection (Gitleaks) + plain-language explanation
-- [ ] Explain -> fix -> re-scan loop
-- [ ] Dependency scan (OSV-Scanner)
-- [ ] Missing-auth check (safe active probe, sandboxed)
-- [ ] Frontend dashboard
+- [x] Secrets detection (Gitleaks), git-ignore aware
+- [x] Dependency scan: known vulns (OSV API) + hallucinated-package check (npm registry)
+- [x] Cloud config scan (Firebase/Firestore open rules)
+- [x] Plain-language explanations (local Qwen via Ollama)
+- [x] Fix generation + re-verification loop (fix on a temp copy, re-scan, confirm gone)
+- [x] Security score + `/scan` and `/fix` API endpoints
+- [ ] Phase 4-5: AI reasoning agent + safe active probe (missing-auth)
+- [ ] Frontend dashboard (Next.js)
 
 ## Setup
 

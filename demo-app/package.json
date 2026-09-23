@@ -1,0 +1,11 @@
+{
+  "name": "aegis-demo-target",
+  "version": "1.0.0",
+  "description": "Deliberately vulnerable demo target for Aegis. Not for deployment.",
+  "main": "app.js",
+  "dependencies": {
+    "express": "4.18.2",
+    "lodash": "4.17.4",
+    "aegis-safe-http-fetcher-xyz": "1.0.0"
+  }
+}

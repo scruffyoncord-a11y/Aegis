@@ -1,0 +1,244 @@
+"""Fix generation and re-verification for Phase 1-3 findings.
+
+For each finding Aegis can propose a patch. The patch is generated and
+verified against a *temporary copy* of the repo -- the original working tree
+is never touched until the user explicitly applies it. Verification means:
+apply the patch to the copy, re-run the same detector, and confirm the finding
+is gone. A fix is only reported "verified" when the re-scan comes back clean.
+"""
+
+from __future__ import annotations
+
+import difflib
+import re
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Any, Callable
+
+from app.detectors.cloud_config import scan_cloud_config
+from app.detectors.dependencies import scan_dependencies
+from app.detectors.secrets import scan_secrets
+
+# Which detector re-checks each finding type.
+_DETECTOR_FOR_TYPE: dict[str, Callable[[str], list[dict[str, Any]]]] = {
+    "secret": scan_secrets,
+    "dependency-vuln": scan_dependencies,
+    "dependency-missing": scan_dependencies,
+    "cloud-misconfig": scan_cloud_config,
+}
+
+
+class FixResult:
+    def __init__(
+        self,
+        finding: dict[str, Any],
+        diffs: dict[str, str],
+        note: str,
+        verified: bool,
+    ):
+        self.finding = finding
+        self.diffs = diffs  # {relative_path: unified_diff}
+        self.note = note
+        self.verified = verified
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "finding_match": self.finding.get("match"),
+            "finding_type": self.finding.get("type"),
+            "diffs": self.diffs,
+            "note": self.note,
+            "verified": self.verified,
+        }
+
+
+def _unified(rel_path: str, before: str, after: str) -> str:
+    return "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"a/{rel_path}",
+            tofile=f"b/{rel_path}",
+        )
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Per-type patch builders: each edits files under `work` (a repo copy) and
+# returns (diffs, note). They do NOT verify -- fix_and_verify does that.
+# --------------------------------------------------------------------------- #
+
+def _fix_secret(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
+    rel = finding["file"]
+    # Detector may prefix the path with the source dir; _resolve_in falls back
+    # to a basename search so either form works.
+    target = _resolve_in(work, rel) or _resolve_in(work, Path(rel).name)
+    if target is None:
+        return {}, "Could not locate the file to patch."
+
+    secret = finding["match"]
+    before = target.read_text(encoding="utf-8")
+
+    # Derive an env var name from `const NAME = "secret"` if present.
+    var_match = re.search(
+        r"(?:const|let|var)\s+([A-Z0-9_]+)\s*=\s*[\"']" + re.escape(secret),
+        before,
+    )
+    env_name = var_match.group(1) if var_match else "SECRET_VALUE"
+
+    after = before.replace(f'"{secret}"', f"process.env.{env_name}")
+    after = after.replace(f"'{secret}'", f"process.env.{env_name}")
+    target.write_text(after, encoding="utf-8")
+
+    diffs = {str(target.relative_to(work)): _unified(rel, before, after)}
+
+    # .env (real value, git-ignored)
+    env_file = work / ".env"
+    env_before = env_file.read_text(encoding="utf-8") if env_file.exists() else ""
+    env_after = env_before + f"{env_name}={secret}\n"
+    env_file.write_text(env_after, encoding="utf-8")
+    diffs[".env"] = _unified(".env", env_before, env_after)
+
+    # .env.example (placeholder, safe to commit)
+    ex_file = work / ".env.example"
+    ex_before = ex_file.read_text(encoding="utf-8") if ex_file.exists() else ""
+    ex_after = ex_before + f"{env_name}=your-value-here\n"
+    ex_file.write_text(ex_after, encoding="utf-8")
+    diffs[".env.example"] = _unified(".env.example", ex_before, ex_after)
+
+    # .gitignore
+    gi_file = work / ".gitignore"
+    gi_before = gi_file.read_text(encoding="utf-8") if gi_file.exists() else ""
+    if ".env" not in gi_before.split():
+        gi_after = gi_before + ("\n" if gi_before and not gi_before.endswith("\n") else "") + ".env\n"
+        gi_file.write_text(gi_after, encoding="utf-8")
+        diffs[".gitignore"] = _unified(".gitignore", gi_before, gi_after)
+
+    note = (
+        f"Moved the secret out of code into an environment variable "
+        f"({env_name}), stored the real value in .env (now git-ignored), and "
+        f"added a .env.example placeholder. IMPORTANT: this key was already "
+        f"exposed -- rotate/revoke it as well; code changes can't undo that."
+    )
+    return diffs, note
+
+
+def _fix_dependency_vuln(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
+    manifest = work / "package.json"
+    before = manifest.read_text(encoding="utf-8")
+    name, _, cur = finding["match"].partition("@")
+    fixed = finding.get("fixed_version")
+    if not fixed:
+        return {}, f"No known fixed version for {name}; upgrade manually."
+    after = re.sub(
+        rf'("{re.escape(name)}"\s*:\s*")[^"]+(")',
+        rf"\g<1>{fixed}\g<2>",
+        before,
+    )
+    manifest.write_text(after, encoding="utf-8")
+    return (
+        {"package.json": _unified("package.json", before, after)},
+        f"Bumped {name} from {cur} to {fixed} (first version without this "
+        f"vulnerability). Run `npm install` to apply.",
+    )
+
+
+def _fix_dependency_missing(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
+    manifest = work / "package.json"
+    before = manifest.read_text(encoding="utf-8")
+    name, _, _ = finding["match"].partition("@")
+    # Remove the non-existent dependency line.
+    after = re.sub(
+        rf'^\s*"{re.escape(name)}"\s*:\s*"[^"]+",?\n',
+        "",
+        before,
+        flags=re.MULTILINE,
+    )
+    # Clean a possible trailing comma left on the previous line.
+    after = re.sub(r",(\s*})", r"\g<1>", after)
+    manifest.write_text(after, encoding="utf-8")
+    return (
+        {"package.json": _unified("package.json", before, after)},
+        f"Removed '{name}' -- it does not exist on npm. Replace it with the "
+        f"real package you actually intended to use.",
+    )
+
+
+def _fix_cloud_misconfig(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
+    target = _resolve_in(work, finding["file"])
+    if target is None:
+        return {}, "Could not locate the rules file to patch."
+    before = target.read_text(encoding="utf-8")
+    # Replace trivially-true conditions with an auth requirement, skipping
+    # comment lines so only real rules are patched.
+    pattern = re.compile(
+        r"(allow\s+[a-z,\s]+?\s*:\s*if\s+)(true|1\s*==\s*1|true\s*==\s*true)\b",
+        re.IGNORECASE,
+    )
+    out_lines = []
+    for line in before.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith(("//", "*", "/*")):
+            out_lines.append(line)
+        else:
+            out_lines.append(pattern.sub(r"\g<1>request.auth != null", line))
+    after = "".join(out_lines)
+    target.write_text(after, encoding="utf-8")
+    return (
+        {str(target.relative_to(work)): _unified(finding["file"], before, after)},
+        "Replaced the world-open condition with `if request.auth != null` "
+        "(authenticated users only). For real security, scope this further to "
+        "the owning user, e.g. `request.auth.uid == resource.data.ownerId`.",
+    )
+
+
+_BUILDERS: dict[str, Callable[[dict, Path, Path], tuple[dict[str, str], str]]] = {
+    "secret": _fix_secret,
+    "dependency-vuln": _fix_dependency_vuln,
+    "dependency-missing": _fix_dependency_missing,
+    "cloud-misconfig": _fix_cloud_misconfig,
+}
+
+
+def _resolve_in(root: Path, rel: str | Path) -> Path | None:
+    """Find a file under root by relative path or basename."""
+    rel = Path(rel)
+    candidate = root / rel
+    if candidate.exists():
+        return candidate
+    matches = list(root.rglob(rel.name))
+    return matches[0] if matches else None
+
+
+def _still_present(finding: dict, findings: list[dict]) -> bool:
+    """Is a finding with the same type+match still in the re-scan results?"""
+    for f in findings:
+        if f.get("type") == finding.get("type") and f.get("match") == finding.get("match"):
+            return True
+    return False
+
+
+def fix_and_verify(finding: dict, repo_path: str) -> FixResult:
+    """Generate a fix on a temp copy, re-scan, and confirm the finding is gone."""
+    builder = _BUILDERS.get(finding.get("type", ""))
+    if builder is None:
+        return FixResult(finding, {}, "No fixer for this finding type.", False)
+
+    original = Path(repo_path).resolve()
+    tmp = Path(tempfile.mkdtemp(prefix="aegis-fix-"))
+    work = tmp / original.name
+    try:
+        shutil.copytree(original, work)
+        diffs, note = builder(finding, work, original)
+        if not diffs:
+            return FixResult(finding, {}, note, False)
+
+        detector = _DETECTOR_FOR_TYPE.get(finding["type"])
+        verified = True
+        if detector is not None:
+            rescan = detector(str(work))
+            verified = not _still_present(finding, rescan)
+
+        return FixResult(finding, diffs, note, verified)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
