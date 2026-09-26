@@ -1,0 +1,153 @@
+@import "tailwindcss";
+
+/* Ported from Epiderm's design system (same team, same visual language). */
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+  --grid-line: rgba(0, 0, 0, 0.09);
+  --card-top: #ffffff;
+  --card-bottom: #f1f1f3;
+  --card-edge: rgba(0, 0, 0, 0.09);
+  --card-shine: rgba(255, 255, 255, 0.9);
+  --card-shadow: rgba(0, 0, 0, 0.18);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+    --grid-line: rgba(255, 255, 255, 0.09);
+    --card-top: #1d1d21;
+    --card-bottom: #111113;
+    --card-edge: rgba(255, 255, 255, 0.1);
+    --card-shine: rgba(255, 255, 255, 0.09);
+    --card-shadow: rgba(0, 0, 0, 0.65);
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* A faint square grid behind everything, fading out toward the bottom so it never competes with content. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 110% 100% at 50% 0%, #000 45%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 110% 100% at 50% 0%, #000 45%, transparent 100%);
+}
+
+/* ---- Loader (ported from 21st.dev "loader-4" via Epiderm): a 3x3 grid of cells that light up in a diagonal wave ---- */
+.tg-loader {
+  --cell-size: 52px;
+  --cell-spacing: 1px;
+  --cells: 3;
+  display: flex;
+  flex-wrap: wrap;
+  width: calc(var(--cells) * (var(--cell-size) + 2 * var(--cell-spacing)));
+  height: calc(var(--cells) * (var(--cell-size) + 2 * var(--cell-spacing)));
+}
+
+.tg-loader .cell {
+  flex: 0 0 var(--cell-size);
+  margin: var(--cell-spacing);
+  background-color: transparent;
+  box-sizing: border-box;
+  border-radius: 4px;
+  animation: 1.5s tg-ripple ease infinite;
+}
+
+.tg-loader .cell.d-1 { animation-delay: 100ms; }
+.tg-loader .cell.d-2 { animation-delay: 200ms; }
+.tg-loader .cell.d-3 { animation-delay: 300ms; }
+.tg-loader .cell.d-4 { animation-delay: 400ms; }
+
+.tg-loader .cell:nth-child(1) { --cell-color: #d946ef; }
+.tg-loader .cell:nth-child(2) { --cell-color: #c026d3; }
+.tg-loader .cell:nth-child(3) { --cell-color: #a21caf; }
+.tg-loader .cell:nth-child(4) { --cell-color: #8b5cf6; }
+.tg-loader .cell:nth-child(5) { --cell-color: #7c3aed; }
+.tg-loader .cell:nth-child(6) { --cell-color: #6d28d9; }
+.tg-loader .cell:nth-child(7) { --cell-color: #3b82f6; }
+.tg-loader .cell:nth-child(8) { --cell-color: #2563eb; }
+.tg-loader .cell:nth-child(9) { --cell-color: #1d4ed8; }
+
+@keyframes tg-ripple {
+  0% { background-color: transparent; }
+  30% { background-color: var(--cell-color); }
+  60% { background-color: transparent; }
+  100% { background-color: transparent; }
+}
+
+/* For people who ask their system for less motion: a still, dim grid instead of the wave. */
+@media (prefers-reduced-motion: reduce) {
+  .tg-loader .cell {
+    animation: none;
+    background-color: var(--cell-color);
+    opacity: 0.35;
+  }
+}
+
+
+/* ---- Raised cards: a soft gradient, rounded edges, a bright top rim and layered shadows so they sit above the page ---- */
+@layer components {
+.tg-card {
+  border: 1px solid var(--card-edge);
+  border-radius: 1.25rem;
+  background: linear-gradient(180deg, var(--card-top), var(--card-bottom));
+  box-shadow:
+    inset 0 1px 0 var(--card-shine),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+    0 1px 2px var(--card-shadow),
+    0 8px 18px -6px var(--card-shadow),
+    0 22px 40px -18px var(--card-shadow);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+button.tg-card:hover,
+a.tg-card:hover {
+  transform: translateY(-3px);
+  box-shadow:
+    inset 0 1px 0 var(--card-shine),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+    0 2px 4px var(--card-shadow),
+    0 14px 26px -6px var(--card-shadow),
+    0 30px 50px -18px var(--card-shadow);
+}
+
+button.tg-card:active {
+  transform: translateY(0);
+}
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tg-card { transition: none; }
+  button.tg-card:hover { transform: none; }
+}
+
+
+/* ---- Printing / Save as PDF: the result page as it looks on screen, without the controls ---- */
+@media print {
+  @page { margin: 10mm; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html, body { background: var(--background) !important; }
+  .no-print, body::before { display: none !important; }
+  main { max-width: none !important; padding: 0 !important; }
+  .tg-card { box-shadow: none !important; break-inside: avoid; }
+  h2, h3 { break-after: avoid; }
+}

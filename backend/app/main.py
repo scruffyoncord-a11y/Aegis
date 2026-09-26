@@ -89,8 +89,11 @@ def scan(req: ScanRequest) -> ScanResponse:
         except Exception as e:  # local model may be unavailable
             f["explanation"] = f"(explanation unavailable: {e})"
 
+    checked_areas = ["Secrets", "Dependencies", "Cloud Config"]
     return ScanResponse(
-        findings=findings, score=risk.score(findings), risk=risk.summarise(findings)
+        findings=findings,
+        score=risk.score(findings),
+        risk=risk.summarise(findings, checked_areas),
     )
 
 
@@ -126,7 +129,7 @@ def probe(req: ScanRequest) -> dict:
         "findings": findings,
         "skipped": False,
         "score": risk.score(findings),
-        "risk": risk.summarise(findings),
+        "risk": risk.summarise(findings, ["Access Control"]),
     }
 
 
