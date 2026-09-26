@@ -90,6 +90,28 @@ function FindingCard({ finding, repoPath }) {
         {finding.explanation}
       </p>
 
+      {finding.evidence && (
+        <div
+          style={{
+            background: "#0b1120",
+            border: "1px solid #334155",
+            borderRadius: 6,
+            padding: 10,
+            marginBottom: 10,
+            fontSize: 12,
+            fontFamily: "monospace",
+          }}
+        >
+          <div style={{ color: "#94a3b8" }}>{finding.evidence.request}</div>
+          <div style={{ color: "#f97316" }}>
+            → {finding.evidence.response_status} response, real data returned
+          </div>
+          <div style={{ color: "#64748b", marginTop: 4 }}>
+            {finding.evidence.response_body}
+          </div>
+        </div>
+      )}
+
       {!fix && (
         <button
           onClick={handleFix}
@@ -315,6 +337,10 @@ export default function Home() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
 
+  const [probing, setProbing] = useState(false);
+  const [probeResult, setProbeResult] = useState(null);
+  const [probeError, setProbeError] = useState(null);
+
   async function handleScan() {
     setScanning(true);
     setError(null);
@@ -335,6 +361,29 @@ export default function Home() {
       setError(String(e));
     } finally {
       setScanning(false);
+    }
+  }
+
+  async function handleProbe() {
+    setProbing(true);
+    setProbeError(null);
+    setProbeResult(null);
+    try {
+      const res = await fetch(`${API}/probe`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo_path: repoPath }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setProbeResult(data);
+    } catch (e) {
+      setProbeError(String(e));
+    } finally {
+      setProbing(false);
     }
   }
 
@@ -381,10 +430,54 @@ export default function Home() {
         >
           {scanning ? "Scanning..." : "Scan"}
         </button>
+        <button
+          onClick={handleProbe}
+          disabled={probing}
+          title="AI-hypothesized, sandbox-confirmed missing-auth check. Builds and runs the repo's own Dockerfile -- slower than Scan."
+          style={{
+            background: "#d946ef",
+            color: "#fff",
+            border: "none",
+            borderRadius: 6,
+            padding: "8px 20px",
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: probing ? "default" : "pointer",
+            opacity: probing ? 0.6 : 1,
+          }}
+        >
+          {probing ? "Pentesting..." : "Run AI Pentest"}
+        </button>
       </div>
 
       {error && (
         <p style={{ color: "#ef4444" }}>Error: {error}</p>
+      )}
+      {probeError && (
+        <p style={{ color: "#ef4444" }}>Probe error: {probeError}</p>
+      )}
+
+      {probeResult && (
+        <div style={{ marginBottom: 24 }}>
+          {probeResult.skipped ? (
+            <p style={{ color: "#94a3b8", fontSize: 14 }}>
+              Active probe skipped: {probeResult.reason}
+            </p>
+          ) : probeResult.findings.length === 0 ? (
+            <p style={{ color: "#22c55e" }}>
+              No missing-auth issues confirmed by the sandbox probe.
+            </p>
+          ) : (
+            <>
+              <h2 style={{ fontSize: 16, color: "#94a3b8", marginBottom: 12 }}>
+                {probeResult.findings.length} confirmed by active probe
+              </h2>
+              {probeResult.findings.map((f, i) => (
+                <FindingCard key={i} finding={f} repoPath={repoPath} />
+              ))}
+            </>
+          )}
+        </div>
       )}
 
       {result && (

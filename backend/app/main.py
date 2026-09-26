@@ -30,6 +30,7 @@ from app.github_oauth import (
     get_token,
     handle_callback,
 )
+from app import risk
 from app.llm import explain_finding
 from app.probes.missing_auth import run_missing_auth_probe
 from app.sandbox import SandboxBuildError, SandboxUnavailable
@@ -57,6 +58,7 @@ class ScanRequest(BaseModel):
 class ScanResponse(BaseModel):
     findings: list[dict[str, Any]]
     score: int
+    risk: dict[str, Any]
 
 
 class FixRequest(BaseModel):
@@ -73,13 +75,6 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-def _score(findings: list[dict]) -> int:
-    """Simple 0-100 security score: 100 minus weighted severity penalties."""
-    weights = {"critical": 25, "high": 15, "medium": 8, "low": 3}
-    penalty = sum(weights.get(f.get("severity", "low"), 3) for f in findings)
-    return max(0, 100 - penalty)
-
-
 @app.post("/scan", response_model=ScanResponse)
 def scan(req: ScanRequest) -> ScanResponse:
     try:
@@ -88,12 +83,15 @@ def scan(req: ScanRequest) -> ScanResponse:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
     for f in findings:
+        risk.classify(f)  # area/likelihood/impact -- rules only, before the LLM sees it
         try:
             f["explanation"] = explain_finding(f)
         except Exception as e:  # local model may be unavailable
             f["explanation"] = f"(explanation unavailable: {e})"
 
-    return ScanResponse(findings=findings, score=_score(findings))
+    return ScanResponse(
+        findings=findings, score=risk.score(findings), risk=risk.summarise(findings)
+    )
 
 
 @app.post("/fix")
@@ -118,12 +116,18 @@ def probe(req: ScanRequest) -> dict:
         return {"findings": [], "skipped": True, "reason": str(e)}
 
     for f in findings:
+        risk.classify(f)
         try:
             f["explanation"] = explain_finding(f)
         except Exception as e:
             f["explanation"] = f"(explanation unavailable: {e})"
 
-    return {"findings": findings, "skipped": False, "score": _score(findings)}
+    return {
+        "findings": findings,
+        "skipped": False,
+        "score": risk.score(findings),
+        "risk": risk.summarise(findings),
+    }
 
 
 @app.get("/github/oauth/login")

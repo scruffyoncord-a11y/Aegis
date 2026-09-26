@@ -25,15 +25,31 @@ if str(_PENTESTGPT_PATH) not in sys.path:
 
 from pentestgpt_legacy.llm.factory import get_client  # noqa: E402
 
+# Two models, two different jobs -- same split Epiderm uses (a code/reasoning
+# model vs. a lighter content-reading model), and the same discipline: the
+# LLM never decides severity, likelihood, or the score. That's rule-based
+# only (see app/risk.py). The LLM's job is strictly framing/explanation.
+#
 # Qwen2.5-Coder: code-tuned, used for anything that reasons about source
 # (route tracing, vulnerability hypothesis -- Phase 4-5).
-DEFAULT_MODEL = os.environ.get("AEGIS_LLM_MODEL", "ollama:qwen2.5-coder:7b")
-REASONING_MODEL = os.environ.get("AEGIS_REASONING_MODEL", DEFAULT_MODEL)
+REASONING_MODEL = os.environ.get("AEGIS_REASONING_MODEL", "ollama:qwen2.5-coder:7b")
+# Gemma 3 4B: smaller and faster, used only to turn an already-decided
+# finding into a plain-language explanation. It cannot change what was
+# found or how severe it is -- those are already fixed before this is called.
+EXPLAIN_MODEL = os.environ.get("AEGIS_EXPLAIN_MODEL", "ollama:gemma3:4b")
+
+# Kept for any old call sites; new code should use REASONING_MODEL/EXPLAIN_MODEL.
+DEFAULT_MODEL = REASONING_MODEL
 
 
 def explain_finding(finding: dict) -> str:
-    """Ask the local model to explain a single finding in plain language."""
-    client = get_client(DEFAULT_MODEL)
+    """Ask the local model to explain a single finding in plain language.
+
+    Uses the lighter EXPLAIN_MODEL (Gemma) -- explanation is a framing task,
+    not a code-reasoning one, and Gemma is faster, which matters since /scan
+    calls this once per finding.
+    """
+    client = get_client(EXPLAIN_MODEL)
 
     prompt = (
         "You are explaining a security finding to a beginner developer, in "
