@@ -43,11 +43,22 @@ _OPEN_POLICY = re.compile(
 )
 
 
+_SKIP_DIRS = {"node_modules", ".git", ".next", "dist", "build", "__pycache__", "venv", ".venv"}
+
+
 def _sql_files(repo_path: str) -> list[Path]:
+    """supabase/migrations/*.sql anywhere in the repo (a monorepo keeps its
+    Supabase project inside a subfolder, not the repo root), plus any *.sql
+    file sitting directly at the repo root for a smaller, single-project repo.
+    """
     root = Path(repo_path)
-    files = list((root / "supabase" / "migrations").glob("*.sql"))
-    files += [p for p in root.glob("*.sql")]
-    return files
+    found = [
+        p
+        for p in root.rglob("supabase/migrations/*.sql")
+        if not any(part in _SKIP_DIRS for part in p.relative_to(root).parts)
+    ]
+    found += list(root.glob("*.sql"))
+    return found
 
 
 def _strip_sql_comments(text: str) -> str:
@@ -57,6 +68,7 @@ def _strip_sql_comments(text: str) -> str:
 
 
 def scan_supabase(repo_path: str) -> list[dict[str, Any]]:
+    root = Path(repo_path)
     files = _sql_files(repo_path)
     if not files:
         return []
@@ -66,7 +78,7 @@ def scan_supabase(repo_path: str) -> list[dict[str, Any]]:
     rls_enabled_tables: set[str] = set()
 
     for path in files:
-        rel = path.name
+        rel = str(path.relative_to(root))
         raw = path.read_text(encoding="utf-8")
 
         for i, line in enumerate(raw.splitlines(), start=1):

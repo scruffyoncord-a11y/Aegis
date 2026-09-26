@@ -13,33 +13,63 @@ unauthenticated visitor's browser would send.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
-from app.detectors.routes import extract_routes, hypothesize_missing_auth
+from app.detectors.routes import extract_routes, find_entry_file, hypothesize_missing_auth
 from app.sandbox import SandboxBuildError, SandboxUnavailable, run_sandbox
 
 _SUCCESS_STATUS = range(200, 300)
 
+_NOOP_STAGE: Callable[[str], None] = lambda _stage: None  # noqa: E731
+
+
+class NoSupportedEntryPoint(RuntimeError):
+    """Raised when the repo doesn't look like an Express app at all -- this
+    means the active probe genuinely could not check anything, which is a
+    different, more honest signal than "checked, found nothing"."""
+
 
 def run_missing_auth_probe(
-    repo_path: str, entry_file: str = "app.js", container_port: int = 3001
+    repo_path: str,
+    entry_file: str | None = None,
+    container_port: int = 3001,
+    on_stage: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Full Phase 4-5 pipeline: extract routes -> hypothesize -> sandbox-probe.
+    """Full Phase 4-5 pipeline: trace routes -> hypothesize -> sandbox-probe.
 
     Returns a list of CONFIRMED findings only. Candidates the probe
     couldn't confirm (e.g. the route actually was protected, contrary to
     the hypothesis) are silently dropped -- Aegis never reports something
     it could not verify as if it were certain.
+
+    Raises NoSupportedEntryPoint if this doesn't look like an Express app
+    (the active probe is currently Express-specific by design) -- callers
+    must surface this as "could not check", not as a clean result.
     """
+    stage = on_stage or _NOOP_STAGE
+
+    stage("tracing")
+    if entry_file is None:
+        entry_file = find_entry_file(repo_path)
+        if entry_file is None:
+            raise NoSupportedEntryPoint(
+                "No Express entry point (app.js/server.js/index.js) found "
+                "anywhere in this repo -- the active probe currently only "
+                "supports Node/Express apps."
+            )
     routes = extract_routes(repo_path, entry_file)
+
+    stage("reasoning")
     candidates = hypothesize_missing_auth(routes)
     if not candidates:
         return []
 
+    stage("sandbox")
     try:
         with run_sandbox(repo_path, container_port) as base_url:
+            stage("probing")
             return [
                 finding
                 for c in candidates

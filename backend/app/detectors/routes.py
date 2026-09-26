@@ -43,6 +43,30 @@ _AUTH_LOOKING_NAMES = re.compile(
     r"auth|Auth|requireLogin|isLoggedIn|verifyToken|checkSession", re.IGNORECASE
 )
 
+_SKIP_DIRS = {"node_modules", ".git", ".next", "dist", "build", "__pycache__", "venv", ".venv"}
+_ENTRY_CANDIDATES = ("app.js", "server.js", "index.js")
+
+
+def find_entry_file(repo_path: str) -> str | None:
+    """Look for a plausible Express entry point anywhere in the repo (a
+    monorepo keeps its backend in a subfolder, e.g. backend/app.js), not
+    just the root. Returns a path relative to repo_path, or None if this
+    doesn't look like an Express app at all -- callers must treat that as
+    "could not check", never as "checked and clean".
+    """
+    root = Path(repo_path)
+    for name in _ENTRY_CANDIDATES:
+        matches = [
+            p
+            for p in root.rglob(name)
+            if not any(part in _SKIP_DIRS for part in p.relative_to(root).parts)
+        ]
+        if matches:
+            # Prefer the shallowest match (closest to repo root).
+            matches.sort(key=lambda p: len(p.relative_to(root).parts))
+            return str(matches[0].relative_to(root))
+    return None
+
 
 def extract_routes(repo_path: str, entry_file: str = "app.js") -> list[dict[str, Any]]:
     """Deterministic regex extraction of Express route definitions."""

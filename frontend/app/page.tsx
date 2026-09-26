@@ -1,13 +1,32 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { AnalysisOverlay } from "./analysis-overlay";
+import type { Step } from "@/components/ui/onboard-card";
 import { Card } from "./components";
 import { DownloadReport } from "./download-report";
+import { API, readStream } from "./lib";
 import { RiskDashboard } from "./risk-dashboard";
 import { SandboxBadge, type SandboxState } from "./sandbox-badge";
 import type { Finding, FixResult, ProbeResponse, RiskSummary, ScanResponse } from "./types";
 
-const API = "http://localhost:8000";
+// Each entry's key must match a real "stage" event name the backend actually
+// emits (see backend/app/main.py::_run_scan / _run_probe) -- the overlay
+// follows real progress, it never fakes a step that isn't really happening.
+const SCAN_STEPS: (Step & { key: string })[] = [
+  { key: "started", label: "Request received", detail: "Reading the repo" },
+  { key: "detecting", label: "Detecting issues", detail: "Gitleaks, dependency, and config checks" },
+  { key: "explaining", label: "Explaining findings", detail: "A local model writes each explanation" },
+];
+
+const PROBE_STEPS: (Step & { key: string })[] = [
+  { key: "started", label: "Request received", detail: "Preparing the active probe" },
+  { key: "tracing", label: "Tracing routes", detail: "Mapping the app's routes and middleware" },
+  { key: "reasoning", label: "Reasoning about auth", detail: "A local model hypothesizes what's unprotected" },
+  { key: "sandbox", label: "Building sandbox", detail: "Building and starting the app's own Dockerfile" },
+  { key: "probing", label: "Probing live", detail: "Sending one safe request, no credentials" },
+  { key: "explaining", label: "Explaining findings", detail: "A local model writes each explanation" },
+];
 
 const SEVERITY_STYLE: Record<string, string> = {
   critical: "bg-red-600 text-white",
@@ -292,56 +311,70 @@ function GitHubConnect({ onConnected }: { onConnected: (path: string) => void })
 export default function Home() {
   const [repoPath, setRepoPath] = useState("../demo-app");
   const [repoConnected, setRepoConnected] = useState(false);
-  const [scanning, setScanning] = useState(false);
+  const [scanOverlayOpen, setScanOverlayOpen] = useState(false);
+  const [scanStage, setScanStage] = useState(0);
+  const [scanFinished, setScanFinished] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResponse | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
 
-  const [probing, setProbing] = useState(false);
+  const [probeOverlayOpen, setProbeOverlayOpen] = useState(false);
+  const [probeStage, setProbeStage] = useState(0);
+  const [probeFinished, setProbeFinished] = useState(false);
   const [probeResult, setProbeResult] = useState<ProbeResponse | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
 
   async function handleScan() {
-    setScanning(true);
+    setScanOverlayOpen(true);
+    setScanStage(0);
+    setScanFinished(false);
     setScanError(null);
     try {
-      const res = await fetch(`${API}/scan`, {
+      const res = await fetch(`${API}/scan/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo_path: repoPath }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await readStream<ScanResponse>(res, (s) => {
+        const i = SCAN_STEPS.findIndex((step) => step.key === s);
+        if (i >= 0) setScanStage((cur) => Math.max(cur, i));
+      });
       setScanResult(data);
     } catch (e) {
       setScanError(String(e));
     } finally {
-      setScanning(false);
+      setScanFinished(true); // lets the overlay play its remaining steps, then it calls back to close itself
     }
   }
 
   async function handleProbe() {
-    setProbing(true);
+    setProbeOverlayOpen(true);
+    setProbeStage(0);
+    setProbeFinished(false);
     setProbeError(null);
     try {
-      const res = await fetch(`${API}/probe`, {
+      const res = await fetch(`${API}/probe/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo_path: repoPath }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await readStream<ProbeResponse>(res, (s) => {
+        const i = PROBE_STEPS.findIndex((step) => step.key === s);
+        if (i >= 0) setProbeStage((cur) => Math.max(cur, i));
+      });
       setProbeResult(data);
     } catch (e) {
       setProbeError(String(e));
     } finally {
-      setProbing(false);
+      setProbeFinished(true);
     }
   }
 
   const combinedRisk = mergeRisk(scanResult?.risk ?? null, probeResult?.risk ?? null);
   const allFindings: Finding[] = [...(scanResult?.findings ?? []), ...(probeResult?.findings ?? [])];
 
-  const sandboxState: SandboxState = probing
+  const sandboxState: SandboxState = probeOverlayOpen
     ? "opening"
     : probeResult?.skipped
       ? "off"
@@ -378,21 +411,38 @@ export default function Home() {
         <button
           type="button"
           onClick={handleScan}
-          disabled={scanning}
+          disabled={scanOverlayOpen}
           className="rounded-lg bg-blue-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:opacity-50"
         >
-          {scanning ? "Scanning…" : "Scan"}
+          {scanOverlayOpen ? "Scanning…" : "Scan"}
         </button>
         <button
           type="button"
           onClick={handleProbe}
-          disabled={probing}
+          disabled={probeOverlayOpen}
           title="AI-hypothesized, sandbox-confirmed missing-auth check. Builds and runs the repo's own Dockerfile."
           className="rounded-lg bg-fuchsia-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-fuchsia-500 disabled:opacity-50"
         >
-          {probing ? "Pentesting…" : "Run AI Pentest"}
+          {probeOverlayOpen ? "Pentesting…" : "Run AI Pentest"}
         </button>
       </div>
+      )}
+
+      {scanOverlayOpen && (
+        <AnalysisOverlay
+          steps={SCAN_STEPS.map(({ label, detail }) => ({ label, detail }))}
+          stage={scanStage}
+          finished={scanFinished}
+          onClosed={() => setScanOverlayOpen(false)}
+        />
+      )}
+      {probeOverlayOpen && (
+        <AnalysisOverlay
+          steps={PROBE_STEPS.map(({ label, detail }) => ({ label, detail }))}
+          stage={probeStage}
+          finished={probeFinished}
+          onClosed={() => setProbeOverlayOpen(false)}
+        />
       )}
 
       {scanError && <p className="mt-2 text-sm text-red-500">Scan error: {scanError}</p>}

@@ -65,13 +65,40 @@ def _parse_npm(manifest: Path) -> dict[str, str]:
     return deps
 
 
-def scan_dependencies(repo_path: str) -> list[dict[str, Any]]:
-    """Scan npm dependencies for known vulns and non-existent packages."""
-    root = Path(repo_path)
-    manifest = root / "package.json"
-    if not manifest.exists():
-        return []
+# Directories never worth descending into: dependency trees, VCS internals,
+# and build output -- large, irrelevant, and their own package.json files
+# (inside node_modules) would otherwise be scanned as if they were the
+# project's own declared dependencies.
+_SKIP_DIRS = {
+    "node_modules", ".git", ".next", "dist", "build", "__pycache__",
+    "venv", ".venv", "vendor", ".turbo",
+}
 
+
+def _find_manifests(root: Path) -> list[Path]:
+    """Every package.json in the repo, at any depth -- most real projects
+    (especially monorepos: frontend/, backend/, packages/*) don't keep it
+    at the root."""
+    return [
+        p
+        for p in root.rglob("package.json")
+        if not any(part in _SKIP_DIRS for part in p.relative_to(root).parts)
+    ]
+
+
+def scan_dependencies(repo_path: str) -> list[dict[str, Any]]:
+    """Scan npm dependencies for known vulns and non-existent packages,
+    across every package.json in the repo (not just the root)."""
+    root = Path(repo_path)
+    findings: list[dict[str, Any]] = []
+
+    for manifest in _find_manifests(root):
+        findings.extend(_scan_one_manifest(manifest, root))
+    return findings
+
+
+def _scan_one_manifest(manifest: Path, root: Path) -> list[dict[str, Any]]:
+    rel = str(manifest.relative_to(root))
     findings: list[dict[str, Any]] = []
     deps = _parse_npm(manifest)
 
@@ -81,7 +108,7 @@ def scan_dependencies(repo_path: str) -> list[dict[str, Any]]:
             findings.append(
                 {
                     "type": "dependency-missing",
-                    "file": "package.json",
+                    "file": rel,
                     "line": None,
                     "rule": "hallucinated-package",
                     "match": f"{name}@{version}",
@@ -115,7 +142,7 @@ def scan_dependencies(repo_path: str) -> list[dict[str, Any]]:
             findings.append(
                 {
                     "type": "dependency-vuln",
-                    "file": "package.json",
+                    "file": rel,
                     "line": None,
                     "rule": f"{len(vulns)} known vulnerabilities",
                     "match": f"{name}@{version}",

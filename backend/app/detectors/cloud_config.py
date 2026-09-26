@@ -22,15 +22,27 @@ _ALLOW_TRUE = re.compile(
 
 _RULE_FILENAMES = ("firestore.rules", "firebase.rules", "storage.rules")
 
+# Same reasoning as dependencies.py's _SKIP_DIRS: a monorepo's real rules
+# file lives inside a subproject (frontend/, functions/, etc.), so this has
+# to search the whole repo -- but never inside dependency/build trees.
+_SKIP_DIRS = {"node_modules", ".git", ".next", "dist", "build", "__pycache__", "venv", ".venv"}
+
+
+def _find_rule_files(root: Path) -> list[Path]:
+    found = []
+    for filename in _RULE_FILENAMES:
+        for p in root.rglob(filename):
+            if not any(part in _SKIP_DIRS for part in p.relative_to(root).parts):
+                found.append(p)
+    return found
+
 
 def scan_cloud_config(repo_path: str) -> list[dict[str, Any]]:
     root = Path(repo_path)
     findings: list[dict[str, Any]] = []
 
-    for filename in _RULE_FILENAMES:
-        path = root / filename
-        if not path.exists():
-            continue
+    for path in _find_rule_files(root):
+        rel = str(path.relative_to(root))
         lines = path.read_text(encoding="utf-8").splitlines()
         for i, line in enumerate(lines, start=1):
             stripped = line.lstrip()
@@ -43,7 +55,7 @@ def scan_cloud_config(repo_path: str) -> list[dict[str, Any]]:
                 findings.append(
                     {
                         "type": "cloud-misconfig",
-                        "file": filename,
+                        "file": rel,
                         "line": i,
                         "rule": "firebase-open-rule",
                         "match": line.strip(),

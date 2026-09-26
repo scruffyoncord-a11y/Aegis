@@ -137,7 +137,9 @@ def _fix_secret(finding: dict, work: Path, original: Path) -> tuple[dict[str, st
 
 
 def _fix_dependency_vuln(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
-    manifest = work / "package.json"
+    manifest = _resolve_in(work, finding["file"])
+    if manifest is None:
+        return {}, "Could not locate the manifest to patch."
     before = manifest.read_text(encoding="utf-8")
     name, _, cur = finding["match"].partition("@")
     fixed = finding.get("fixed_version")
@@ -150,14 +152,16 @@ def _fix_dependency_vuln(finding: dict, work: Path, original: Path) -> tuple[dic
     )
     manifest.write_text(after, encoding="utf-8")
     return (
-        {"package.json": _unified("package.json", before, after)},
+        {finding["file"]: _unified(finding["file"], before, after)},
         f"Bumped {name} from {cur} to {fixed} (first version without this "
         f"vulnerability). Run `npm install` to apply.",
     )
 
 
 def _fix_dependency_missing(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
-    manifest = work / "package.json"
+    manifest = _resolve_in(work, finding["file"])
+    if manifest is None:
+        return {}, "Could not locate the manifest to patch."
     before = manifest.read_text(encoding="utf-8")
     name, _, _ = finding["match"].partition("@")
     # Remove the non-existent dependency line.
@@ -171,7 +175,7 @@ def _fix_dependency_missing(finding: dict, work: Path, original: Path) -> tuple[
     after = re.sub(r",(\s*})", r"\g<1>", after)
     manifest.write_text(after, encoding="utf-8")
     return (
-        {"package.json": _unified("package.json", before, after)},
+        {finding["file"]: _unified(finding["file"], before, after)},
         f"Removed '{name}' -- it does not exist on npm. Replace it with the "
         f"real package you actually intended to use.",
     )
