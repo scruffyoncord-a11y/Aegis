@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from app.detectors import run_all_detectors
 from app.detectors.secrets import GitleaksNotInstalled
 from app.fixers import fix_and_verify
-from app.github_auth import RepoRefError, clone_repo, verify_repo_access
+from app.github_auth import RepoRefError, clone_repo, list_user_repos, verify_repo_access
 from app.github_oauth import (
     FRONTEND_URL,
     OAuthError,
@@ -175,6 +175,17 @@ def github_session_status(aegis_session: str | None = Cookie(default=None)) -> d
     if not session:
         return {"connected": False}
     return {"connected": True, "github_login": session.get("github_login")}
+
+
+@app.get("/github/repos")
+def github_repos(aegis_session: str | None = Cookie(default=None)) -> dict:
+    """List repos the connected account can push/admin to, for the repo
+    picker. Uses the server-side session token -- never sent to the frontend.
+    """
+    token = get_token(aegis_session)
+    if not token:
+        raise HTTPException(status_code=401, detail="Not connected to GitHub. Connect first.")
+    return {"repos": list_user_repos(token)}
 
 
 @app.post("/github/logout")

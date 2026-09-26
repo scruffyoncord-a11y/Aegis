@@ -117,19 +117,37 @@ function FindingCard({ finding, repoPath }: { finding: Finding; repoPath: string
   );
 }
 
+type Repo = { full_name: string; private: boolean; permission: string; updated_at: string | null };
+
 function GitHubConnect({ onConnected }: { onConnected: (path: string) => void }) {
   const [status, setStatus] = useState<{ loading: boolean; connected: boolean; github_login?: string }>({ loading: true, connected: false });
-  const [repoUrl, setRepoUrl] = useState("");
-  const [cloning, setCloning] = useState(false);
+  const [repos, setRepos] = useState<Repo[] | null>(null);
+  const [reposError, setReposError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [cloningRepo, setCloningRepo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cloned, setCloned] = useState<{ owner: string; repo: string; permission: string; private: boolean } | null>(null);
 
   async function refreshStatus() {
     try {
       const res = await fetch(`${API}/github/session`, { credentials: "include" });
-      setStatus({ loading: false, ...(await res.json()) });
+      const data = await res.json();
+      setStatus({ loading: false, ...data });
+      if (data.connected) loadRepos();
     } catch {
       setStatus({ loading: false, connected: false });
+    }
+  }
+
+  async function loadRepos() {
+    setReposError(null);
+    try {
+      const res = await fetch(`${API}/github/repos`, { credentials: "include" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      setRepos(data.repos);
+    } catch (e) {
+      setReposError(String(e));
     }
   }
 
@@ -140,11 +158,12 @@ function GitHubConnect({ onConnected }: { onConnected: (path: string) => void })
   async function handleLogout() {
     await fetch(`${API}/github/logout`, { method: "POST", credentials: "include" });
     setCloned(null);
+    setRepos(null);
     refreshStatus();
   }
 
-  async function handleClone() {
-    setCloning(true);
+  async function handlePick(repoUrl: string) {
+    setCloningRepo(repoUrl);
     setError(null);
     try {
       const res = await fetch(`${API}/github/verify-and-clone`, {
@@ -160,8 +179,29 @@ function GitHubConnect({ onConnected }: { onConnected: (path: string) => void })
     } catch (e) {
       setError(String(e));
     } finally {
-      setCloning(false);
+      setCloningRepo(null);
     }
+  }
+
+  const filtered = (repos ?? []).filter((r) => r.full_name.toLowerCase().includes(query.toLowerCase()));
+
+  // Once a repo is verified and cloned, collapse the whole connect/picker
+  // UI down to one line -- the dashboard below is the point from here on.
+  if (cloned) {
+    return (
+      <div className="tg-card flex items-center justify-between gap-3 p-4 text-sm">
+        <span className="text-emerald-600 dark:text-emerald-400">
+          Connected -- {cloned.owner}/{cloned.repo} ({cloned.permission} access{cloned.private ? ", private" : ""})
+        </span>
+        <button
+          type="button"
+          onClick={() => setCloned(null)}
+          className="shrink-0 text-zinc-500 underline"
+        >
+          Change repo
+        </button>
+      </div>
+    );
   }
 
   return (
@@ -186,37 +226,72 @@ function GitHubConnect({ onConnected }: { onConnected: (path: string) => void })
               disconnect
             </button>
           </p>
-          <div className="mt-2 flex gap-2">
-            <input
-              value={repoUrl}
-              onChange={(e) => setRepoUrl(e.target.value)}
-              placeholder="owner/repo or github.com/owner/repo"
-              className="flex-1 rounded-lg border border-zinc-300 bg-transparent p-2 text-sm dark:border-zinc-700"
-            />
+
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search repositories, or paste a URL…"
+            className="mt-2 w-full rounded-lg border border-zinc-300 bg-transparent p-2 text-sm dark:border-zinc-700"
+          />
+
+          {reposError && (
+            <p className="mt-2 text-sm text-red-500">
+              Could not list repos: {reposError}{" "}
+              <button type="button" onClick={loadRepos} className="underline">retry</button>
+            </p>
+          )}
+
+          {repos === null && !reposError && (
+            <p className="mt-2 text-sm text-zinc-500">Loading your repos…</p>
+          )}
+
+          {repos !== null && (
+            <ul className="mt-2 max-h-72 space-y-1 overflow-y-auto">
+              {filtered.length === 0 && (
+                <li className="text-sm text-zinc-500">
+                  {query ? "No matching repo. You can also paste a full owner/repo URL above." : "No repos with write access found."}
+                </li>
+              )}
+              {filtered.map((r) => (
+                <li key={r.full_name}>
+                  <button
+                    type="button"
+                    onClick={() => handlePick(r.full_name)}
+                    disabled={cloningRepo !== null}
+                    className="tg-card flex w-full items-center justify-between gap-2 !rounded-lg px-3 py-2 text-left text-sm disabled:opacity-50"
+                  >
+                    <span className="truncate">{r.full_name}</span>
+                    <span className="shrink-0 text-xs text-zinc-500">
+                      {cloningRepo === r.full_name ? "Verifying…" : r.private ? "private" : "public"}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {/* Paste-a-URL fallback: if what's typed looks like an owner/repo not in the list above. */}
+          {query.includes("/") && filtered.length === 0 && (
             <button
               type="button"
-              onClick={handleClone}
-              disabled={cloning || !repoUrl}
-              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+              onClick={() => handlePick(query)}
+              disabled={cloningRepo !== null}
+              className="mt-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
             >
-              {cloning ? "Verifying…" : "Verify & Clone"}
+              {cloningRepo ? "Verifying…" : `Verify & Clone "${query}"`}
             </button>
-          </div>
+          )}
         </>
       )}
 
       {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
-      {cloned && (
-        <p className="mt-2 text-sm text-emerald-600 dark:text-emerald-400">
-          Verified -- {cloned.owner}/{cloned.repo} ({cloned.permission} access{cloned.private ? ", private" : ""})
-        </p>
-      )}
     </Card>
   );
 }
 
 export default function Home() {
   const [repoPath, setRepoPath] = useState("../demo-app");
+  const [repoConnected, setRepoConnected] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResponse | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -284,9 +359,15 @@ export default function Home() {
       </p>
 
       <div className="mt-6">
-        <GitHubConnect onConnected={setRepoPath} />
+        <GitHubConnect
+          onConnected={(path) => {
+            setRepoPath(path);
+            setRepoConnected(true);
+          }}
+        />
       </div>
 
+      {repoConnected && (
       <div className="mt-4 flex flex-wrap gap-2">
         <input
           value={repoPath}
@@ -312,6 +393,7 @@ export default function Home() {
           {probing ? "Pentesting…" : "Run AI Pentest"}
         </button>
       </div>
+      )}
 
       {scanError && <p className="mt-2 text-sm text-red-500">Scan error: {scanError}</p>}
       {probeError && <p className="mt-2 text-sm text-red-500">Probe error: {probeError}</p>}

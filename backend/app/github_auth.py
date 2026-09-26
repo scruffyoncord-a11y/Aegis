@@ -19,6 +19,7 @@ Token handling rules (read before touching this file):
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import shutil
@@ -93,6 +94,38 @@ def verify_repo_access(repo_url: str, token: str) -> dict[str, Any]:
     }
 
 
+def list_user_repos(token: str) -> list[dict[str, Any]]:
+    """List repos the connected account can push/admin to, for the repo
+    picker -- so the user clicks a repo they already have instead of typing
+    owner/repo by hand. Read-only listing, same token, no new scope needed.
+    """
+    resp = httpx.get(
+        "https://api.github.com/user/repos",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        },
+        params={"per_page": 100, "sort": "updated", "affiliation": "owner,collaborator"},
+        timeout=15.0,
+    )
+    resp.raise_for_status()
+
+    repos = []
+    for r in resp.json():
+        perms = r.get("permissions", {}) or {}
+        if not (perms.get("push") or perms.get("admin")):
+            continue  # only list repos we could actually verify+clone anyway
+        repos.append(
+            {
+                "full_name": r["full_name"],
+                "private": r.get("private", False),
+                "permission": "admin" if perms.get("admin") else "write",
+                "updated_at": r.get("updated_at"),
+            }
+        )
+    return repos
+
+
 def clone_repo(repo_url: str, token: str, branch: str | None = None) -> Path:
     """Shallow-clone the repo into a fresh temp dir using the token, then
     discard the token immediately -- it's passed via a process-scoped env
@@ -104,11 +137,18 @@ def clone_repo(repo_url: str, token: str, branch: str | None = None) -> Path:
     dest_parent = Path(tempfile.mkdtemp(prefix="aegis-clone-"))
     dest = dest_parent / repo
 
+    # GitHub's git-over-HTTPS smart protocol wants Basic auth (this is what
+    # GitHub Actions' own checkout action sends) -- a raw "Bearer" header,
+    # which works fine against the REST API, is rejected here with
+    # "invalid credentials". The username can be anything; only the token
+    # (as the password half) matters.
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_CONFIG_COUNT"] = "1"
     env["GIT_CONFIG_KEY_0"] = "http.extraheader"
-    env["GIT_CONFIG_VALUE_0"] = f"AUTHORIZATION: bearer {token}"
+    env["GIT_CONFIG_VALUE_0"] = f"AUTHORIZATION: basic {basic}"
 
     cmd = ["git", "clone", "--depth", "1"]
     if branch:
