@@ -97,6 +97,19 @@ def _level(sec_score: int) -> str:
     return "critical"
 
 
+def _source(finding: dict[str, Any]) -> str:
+    """Which detector produced this finding. cloud-misconfig is split across
+    two independent detectors (Firebase rules vs. Supabase RLS), so it needs
+    the rule id, not just the type, to name the real source precisely.
+    """
+    rule = str(finding.get("rule", ""))
+    if rule.startswith("supabase-"):
+        return "Supabase RLS parser"
+    if rule == "firebase-open-rule":
+        return "Firebase rules parser"
+    return SOURCE_FOR_TYPE.get(finding.get("type", ""), "Aegis")
+
+
 def _label(finding: dict[str, Any]) -> str:
     ftype = finding.get("type", "finding")
     detail = finding.get("match") or finding.get("rule") or ""
@@ -147,7 +160,7 @@ def summarise(
                 "likelihood": li,
                 "impact": im,
                 "weight": min(100, li * im * 4),
-                "source": SOURCE_FOR_TYPE.get(f.get("type", ""), "Aegis"),
+                "source": _source(f),
             }
         )
     matrix.sort(key=lambda m: m["weight"], reverse=True)

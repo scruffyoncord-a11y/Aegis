@@ -20,15 +20,24 @@ from app.detectors.cloud_config import scan_cloud_config
 from app.detectors.dependencies import scan_dependencies
 from app.detectors.routes import extract_routes
 from app.detectors.secrets import scan_secrets
+from app.detectors.supabase import scan_supabase
 from app.probes.missing_auth import run_missing_auth_probe
 from app.sandbox import SandboxBuildError, SandboxUnavailable
+
+
+def _scan_cloud_all(repo_path: str) -> list[dict[str, Any]]:
+    """cloud-misconfig findings can come from either Firebase or Supabase --
+    re-verification has to check both, since a single finding type spans
+    two independent detectors."""
+    return scan_cloud_config(repo_path) + scan_supabase(repo_path)
+
 
 # Which detector re-checks each finding type.
 _DETECTOR_FOR_TYPE: dict[str, Callable[[str], list[dict[str, Any]]]] = {
     "secret": scan_secrets,
     "dependency-vuln": scan_dependencies,
     "dependency-missing": scan_dependencies,
-    "cloud-misconfig": scan_cloud_config,
+    "cloud-misconfig": _scan_cloud_all,
     "missing-auth": run_missing_auth_probe,
 }
 
@@ -168,7 +177,7 @@ def _fix_dependency_missing(finding: dict, work: Path, original: Path) -> tuple[
     )
 
 
-def _fix_cloud_misconfig(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
+def _fix_firebase_misconfig(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
     target = _resolve_in(work, finding["file"])
     if target is None:
         return {}, "Could not locate the rules file to patch."
@@ -194,6 +203,68 @@ def _fix_cloud_misconfig(finding: dict, work: Path, original: Path) -> tuple[dic
         "(authenticated users only). For real security, scope this further to "
         "the owning user, e.g. `request.auth.uid == resource.data.ownerId`.",
     )
+
+
+def _fix_supabase_misconfig(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
+    target = _resolve_in(work, finding["file"])
+    if target is None:
+        return {}, "Could not locate the migration file to patch."
+    before = target.read_text(encoding="utf-8")
+    rule = finding.get("rule", "")
+
+    if rule == "supabase-rls-disabled":
+        after = re.sub(
+            r"(ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?[\"']?\w+[\"']?\s+)DISABLE(\s+ROW\s+LEVEL\s+SECURITY)",
+            r"\g<1>ENABLE\g<2>",
+            before,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        note = "Flipped DISABLE back to ENABLE ROW LEVEL SECURITY -- someone had explicitly turned it off."
+
+    elif rule == "supabase-open-policy":
+        # No inline "--" comment here: this sits before the statement's own
+        # trailing ";" on the same line, and a "--" comment runs to end of
+        # line -- it would swallow that ";" and leave invalid SQL. The TODO
+        # goes in the returned note instead.
+        after = re.sub(
+            r"(USING|WITH\s+CHECK)\s*\(\s*true\s*\)",
+            r"\g<1> (auth.uid() = user_id)",
+            before,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        note = (
+            "Replaced the open policy with a per-user ownership check template: "
+            "`auth.uid() = user_id`. This is a placeholder -- replace `user_id` "
+            "with the column that actually identifies the row's owner in this table."
+        )
+
+    elif rule == "supabase-rls-never-enabled":
+        table_match = re.search(r"CREATE TABLE (\w+)", finding["match"], re.IGNORECASE)
+        table = table_match.group(1) if table_match else None
+        if not table:
+            return {}, "Could not determine the table name to enable RLS on."
+        after = before.rstrip() + f"\n\nALTER TABLE {table} ENABLE ROW LEVEL SECURITY;\n"
+        note = (
+            f"Added `ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;`. A table "
+            f"with RLS enabled and no policies denies all access by default, "
+            f"so add a policy scoped to the right owner before using this table."
+        )
+
+    else:
+        return {}, f"No fixer for Supabase rule '{rule}'."
+
+    target.write_text(after, encoding="utf-8")
+    return {str(target.relative_to(work)): _unified(finding["file"], before, after)}, note
+
+
+def _fix_cloud_misconfig(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
+    """Dispatches to the Firebase or Supabase fixer based on which detector
+    produced this finding -- both share the `cloud-misconfig` type."""
+    if str(finding.get("rule", "")).startswith("supabase-"):
+        return _fix_supabase_misconfig(finding, work, original)
+    return _fix_firebase_misconfig(finding, work, original)
 
 
 def _fix_missing_auth(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
