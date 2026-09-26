@@ -13,3 +13,6 @@ loguru
 openai
 anthropic
 google-genai
+
+# Phase 4-5: sandboxed active probe
+docker

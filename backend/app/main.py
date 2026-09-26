@@ -31,6 +31,8 @@ from app.github_oauth import (
     handle_callback,
 )
 from app.llm import explain_finding
+from app.probes.missing_auth import run_missing_auth_probe
+from app.sandbox import SandboxBuildError, SandboxUnavailable
 
 SESSION_COOKIE = "aegis_session"
 
@@ -99,6 +101,29 @@ def fix(req: FixRequest) -> dict:
     """Generate a verified fix for one finding (does not touch the working tree)."""
     result = fix_and_verify(req.finding, req.repo_path)
     return result.to_dict()
+
+
+@app.post("/probe")
+def probe(req: ScanRequest) -> dict:
+    """Phase 4-5: AI-hypothesized, sandbox-confirmed active probe.
+
+    Slower than /scan (builds and runs a Docker container), so it's a
+    separate call the frontend triggers explicitly rather than folding into
+    every /scan. Skips cleanly (never 500s) if Docker or a Dockerfile isn't
+    available -- the caller is told exactly why, not left guessing.
+    """
+    try:
+        findings = run_missing_auth_probe(req.repo_path)
+    except (SandboxUnavailable, SandboxBuildError) as e:
+        return {"findings": [], "skipped": True, "reason": str(e)}
+
+    for f in findings:
+        try:
+            f["explanation"] = explain_finding(f)
+        except Exception as e:
+            f["explanation"] = f"(explanation unavailable: {e})"
+
+    return {"findings": findings, "skipped": False, "score": _score(findings)}
 
 
 @app.get("/github/oauth/login")

@@ -18,7 +18,10 @@ from typing import Any, Callable
 
 from app.detectors.cloud_config import scan_cloud_config
 from app.detectors.dependencies import scan_dependencies
+from app.detectors.routes import extract_routes
 from app.detectors.secrets import scan_secrets
+from app.probes.missing_auth import run_missing_auth_probe
+from app.sandbox import SandboxBuildError, SandboxUnavailable
 
 # Which detector re-checks each finding type.
 _DETECTOR_FOR_TYPE: dict[str, Callable[[str], list[dict[str, Any]]]] = {
@@ -26,6 +29,7 @@ _DETECTOR_FOR_TYPE: dict[str, Callable[[str], list[dict[str, Any]]]] = {
     "dependency-vuln": scan_dependencies,
     "dependency-missing": scan_dependencies,
     "cloud-misconfig": scan_cloud_config,
+    "missing-auth": run_missing_auth_probe,
 }
 
 
@@ -192,11 +196,60 @@ def _fix_cloud_misconfig(finding: dict, work: Path, original: Path) -> tuple[dic
     )
 
 
+def _fix_missing_auth(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
+    entry_file = finding.get("entry_file", "app.js")
+    target = work / entry_file
+    if not target.exists():
+        return {}, "Could not locate the app's entry file to patch."
+
+    routes = extract_routes(str(work), entry_file)
+
+    # Reuse whatever auth middleware this codebase already uses elsewhere,
+    # rather than inventing a function name that doesn't exist.
+    auth_name = next(
+        (r["middleware"][0] for r in routes if r["has_auth_looking_middleware"]),
+        None,
+    )
+    if not auth_name:
+        return (
+            {},
+            "No existing auth middleware found elsewhere in this app to reuse -- "
+            "add one manually, then re-scan.",
+        )
+
+    method, _, path = finding["match"].partition(" ")
+    target_route = next(
+        (r for r in routes if r["method"] == method and r["path"] == path), None
+    )
+    if target_route is None:
+        return {}, "Could not re-locate the vulnerable route to patch."
+
+    lines = target.read_text(encoding="utf-8").splitlines(keepends=True)
+    idx = target_route["line"] - 1
+    before = "".join(lines)
+
+    lines[idx] = re.sub(
+        r"""(app\.\w+\s*\(\s*['"`][^'"`]+['"`]\s*,\s*)""",
+        rf"\g<1>{auth_name}, ",
+        lines[idx],
+        count=1,
+    )
+    after = "".join(lines)
+    target.write_text(after, encoding="utf-8")
+
+    return (
+        {entry_file: _unified(entry_file, before, after)},
+        f"Added the existing `{auth_name}` middleware to this route -- the same "
+        f"check other protected routes in this app already use.",
+    )
+
+
 _BUILDERS: dict[str, Callable[[dict, Path, Path], tuple[dict[str, str], str]]] = {
     "secret": _fix_secret,
     "dependency-vuln": _fix_dependency_vuln,
     "dependency-missing": _fix_dependency_missing,
     "cloud-misconfig": _fix_cloud_misconfig,
+    "missing-auth": _fix_missing_auth,
 }
 
 
@@ -236,8 +289,12 @@ def fix_and_verify(finding: dict, repo_path: str) -> FixResult:
         detector = _DETECTOR_FOR_TYPE.get(finding["type"])
         verified = True
         if detector is not None:
-            rescan = detector(str(work))
-            verified = not _still_present(finding, rescan)
+            try:
+                rescan = detector(str(work))
+                verified = not _still_present(finding, rescan)
+            except (SandboxUnavailable, SandboxBuildError) as e:
+                note += f" (Could not re-verify: {e})"
+                verified = False
 
         return FixResult(finding, diffs, note, verified)
     finally:

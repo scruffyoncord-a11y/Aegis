@@ -12,9 +12,12 @@ dependency, MIT licensed.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 from pathlib import Path
+from typing import Any
 
 _PENTESTGPT_PATH = Path(__file__).resolve().parents[2] / "PentestGPT"
 if str(_PENTESTGPT_PATH) not in sys.path:
@@ -22,7 +25,10 @@ if str(_PENTESTGPT_PATH) not in sys.path:
 
 from pentestgpt_legacy.llm.factory import get_client  # noqa: E402
 
+# Qwen2.5-Coder: code-tuned, used for anything that reasons about source
+# (route tracing, vulnerability hypothesis -- Phase 4-5).
 DEFAULT_MODEL = os.environ.get("AEGIS_LLM_MODEL", "ollama:qwen2.5-coder:7b")
+REASONING_MODEL = os.environ.get("AEGIS_REASONING_MODEL", DEFAULT_MODEL)
 
 
 def explain_finding(finding: dict) -> str:
@@ -42,3 +48,34 @@ def explain_finding(finding: dict) -> str:
 
     response, _conversation_id = client.send_new_message(prompt)
     return response
+
+
+_JSON_BLOCK_RE = re.compile(r"\[.*\]|\{.*\}", re.DOTALL)
+
+
+def ask_json(prompt: str, model: str = REASONING_MODEL) -> Any:
+    """Send a prompt expecting a JSON response, and parse it robustly.
+
+    Local models often wrap JSON in markdown fences or add a sentence before
+    or after it -- we pull out the first bracket-balanced-looking block
+    rather than requiring a perfectly clean response.
+    """
+    client = get_client(model)
+    response, _conversation_id = client.send_new_message(prompt)
+
+    text = response.strip()
+    # Strip a ```json ... ``` or ``` ... ``` fence if present.
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    match = _JSON_BLOCK_RE.search(text)
+    if match:
+        return json.loads(match.group(0))
+
+    raise ValueError(f"Could not parse JSON from model response: {text[:200]!r}")
