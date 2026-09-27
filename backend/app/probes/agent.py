@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from app.detectors.routes import detect_and_find_entry, extract_routes
 from app.probes.tool import Tool
-from app.sandbox import SandboxBuildError, SandboxUnavailable, run_sandbox
+from app.sandbox import SandboxBuildError, SandboxUnavailable, run_sandbox_auto
 
 _NOOP_STAGE: Callable[[str], None] = lambda _stage: None  # noqa: E731
 
@@ -79,7 +79,7 @@ def run_active_probes(
     stage("sandbox")
     findings: list[dict[str, Any]] = []
     try:
-        with run_sandbox(repo_path, container_port) as base_url:
+        with run_sandbox_auto(repo_path, container_port) as base_url:
             stage("probing")
             for tool, candidates in tool_candidates:
                 for candidate in candidates:

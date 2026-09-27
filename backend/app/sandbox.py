@@ -6,16 +6,22 @@ tears down**, on a random free host port, with no other network access than
 what the container image itself needs to boot -- and every probe in
 `app/probes/` talks only to that one disposable container.
 
-Convention: the target repo must provide its own `Dockerfile` (same
-convention many CI systems use). Aegis does not guess how to run an
-arbitrary app -- if there's no Dockerfile, the active-probe stage is simply
-skipped and Aegis says so, rather than trying to run untrusted code some
-other way.
+Convention: the target repo should provide its own `Dockerfile` (same
+convention many CI systems use) -- if it has one, that always wins and is
+used exactly as-is. If it doesn't, `run_sandbox_auto` falls back to asking
+the local model to synthesize a minimal one from the repo's own
+build/dependency files (see app/dockerfile_inference.py); that guess is
+written into a disposable COPY of the repo, never the original, and built
+with the exact same sandbox machinery. If neither a real nor an inferred
+Dockerfile is available, the active-probe stage is simply skipped and
+Aegis says so, rather than trying to run untrusted code some other way.
 """
 
 from __future__ import annotations
 
 import contextlib
+import shutil
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -100,6 +106,58 @@ def run_sandbox(repo_path: str, container_port: int) -> Iterator[str]:
             client.images.remove(tag, force=True)
         except Exception:
             pass
+
+
+def run_sandbox_auto(repo_path: str, container_port: int):
+    """Like run_sandbox, but if the repo has no Dockerfile, tries a
+    best-effort model-synthesized one first (see app/dockerfile_inference.py)
+    before giving up. A repo-provided Dockerfile always wins outright --
+    inference is a fallback, never a replacement for it.
+
+    Returns a context manager, same as run_sandbox -- use with `with ... as
+    base_url:`.
+    """
+    if has_dockerfile(repo_path):
+        return run_sandbox(repo_path, container_port)
+
+    from app.dockerfile_inference import infer_dockerfile  # local import: keep the LLM dependency out of sandbox.py's module load unless actually needed
+
+    inferred = infer_dockerfile(repo_path)
+    if inferred is None:
+        raise SandboxUnavailable(
+            f"No Dockerfile in {repo_path!r}, and the local model could not "
+            "infer how to build and run this app from its own files either. "
+            "Add a Dockerfile to enable the active-probe stage."
+        )
+    dockerfile_text, inferred_port = inferred
+    return _run_sandbox_with_synthesized_dockerfile(repo_path, dockerfile_text, inferred_port)
+
+
+@contextlib.contextmanager
+def _run_sandbox_with_synthesized_dockerfile(
+    repo_path: str, dockerfile_text: str, container_port: int
+) -> Iterator[str]:
+    """Copies the repo to a temp dir (the original is NEVER touched), writes
+    the model-synthesized Dockerfile into that copy only, then reuses
+    run_sandbox's exact build/run/teardown path unchanged -- same resource
+    limits, same cleanup, same honest failure behavior on a bad guess.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="aegis-autodockerfile-"))
+    work = tmp / Path(repo_path).resolve().name
+    try:
+        shutil.copytree(
+            repo_path,
+            work,
+            ignore=shutil.ignore_patterns(
+                "node_modules", ".git", ".next", "dist", "build",
+                "__pycache__", "venv", ".venv",
+            ),
+        )
+        (work / "Dockerfile").write_text(dockerfile_text, encoding="utf-8")
+        with run_sandbox(str(work), container_port) as base_url:
+            yield base_url
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _wait_until_ready(base_url: str) -> None:
