@@ -39,6 +39,7 @@ from app.llm import explain_finding
 from app.probes.agent import NoSupportedEntryPoint, run_active_probes
 from app.probes.idor import IDOR_TOOL
 from app.probes.missing_auth import MISSING_AUTH_TOOL
+from app.probes.supabase_probe import NoSupabaseProject, run_supabase_probe
 from app.sandbox import SandboxBuildError, SandboxUnavailable
 from app.subprojects import find_subprojects
 
@@ -173,7 +174,17 @@ def _run_probe(repo_path: str, progress: Callable[[str], None]) -> dict:
     """
     try:
         findings = run_active_probes(repo_path, [MISSING_AUTH_TOOL, IDOR_TOOL], on_stage=progress)
-    except (SandboxUnavailable, SandboxBuildError, NoSupportedEntryPoint) as e:
+    except NoSupportedEntryPoint:
+        # No Express/FastAPI/Flask server to trace -- this is also exactly
+        # what a Supabase-backed SPA with no server of its own looks like,
+        # so try that specific, different-shaped check before giving up.
+        try:
+            progress("reasoning")
+            findings = run_supabase_probe(repo_path)
+            progress("probing")
+        except NoSupabaseProject as e:
+            return {"findings": [], "skipped": True, "reason": str(e)}
+    except (SandboxUnavailable, SandboxBuildError) as e:
         return {"findings": [], "skipped": True, "reason": str(e)}
 
     progress("explaining")

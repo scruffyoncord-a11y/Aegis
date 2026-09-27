@@ -155,3 +155,20 @@ def scan_supabase(repo_path: str) -> list[dict[str, Any]]:
             )
 
     return findings
+
+
+def list_table_names(repo_path: str) -> list[str]:
+    """Every table name seen in a CREATE TABLE statement across the repo's
+    Supabase migrations, lowercased and deduplicated. Shares the same file
+    discovery and parsing as scan_supabase() so the live probe (see
+    app/probes/supabase_probe.py) checks exactly the tables the static
+    scanner already knows about, never a separately-guessed list.
+    """
+    tables: set[str] = set()
+    for path in _sql_files(repo_path):
+        raw = _strip_sql_comments(path.read_text(encoding="utf-8"))
+        for line in raw.splitlines():
+            m = _CREATE_TABLE.search(line)
+            if m:
+                tables.add(m.group(1).lower())
+    return sorted(tables)

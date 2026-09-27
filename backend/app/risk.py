@@ -20,6 +20,7 @@ AREA_FOR_TYPE: dict[str, str] = {
     "cloud-misconfig": "Cloud Config",
     "missing-auth": "Access Control",
     "idor": "Access Control",
+    "supabase-rls-missing": "Access Control",
 }
 
 # Which detector actually produced a finding of this type -- shown in the
@@ -32,6 +33,7 @@ SOURCE_FOR_TYPE: dict[str, str] = {
     "cloud-misconfig": "Config parser",
     "missing-auth": "Sandbox probe",
     "idor": "Sandbox probe",
+    "supabase-rls-missing": "Supabase live probe",
 }
 
 # 1-5: how immediately an attacker could act on this, given only the
@@ -44,6 +46,7 @@ LIKELIHOOD_FOR_TYPE: dict[str, int] = {
     "cloud-misconfig": 5,  # trivially reachable by anyone
     "missing-auth": 5,  # confirmed live via a real sandboxed request
     "idor": 5,  # confirmed live via a real sandboxed request
+    "supabase-rls-missing": 5,  # confirmed live against the actual hosted project
     "dependency-vuln": 3,  # needs a matching public exploit to exist
     "dependency-missing": 2,  # needs an attacker to register + get it installed
 }
