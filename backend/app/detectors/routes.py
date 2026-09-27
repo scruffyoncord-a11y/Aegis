@@ -142,20 +142,69 @@ def extract_routes(
     return _extract_express(text)
 
 
-def _route(method: str, path: str, line: int, has_auth: bool, source: str, middleware=None):
+# A path parameter that looks like a resource ID: Express :id, FastAPI/Flask
+# {id}/{order_id}, Flask <id>/<int:id>. Used to find IDOR candidates -- a
+# route with no id-like parameter can't have an ID-swap ownership problem.
+# Public (no leading underscore): reused by app/probes/idor.py to substitute
+# a concrete test id into the path template for the active probe.
+ID_PARAM_RE = re.compile(r"(:\w*id\w*)|(\{\w*id\w*\})|(<(?:int:|string:)?\w*id\w*>)", re.IGNORECASE)
+
+_HANDLER_SNIPPET_LINES = 15  # enough to see the resource lookup + any ownership check
+
+# Any line that starts a NEW route definition, across all three frameworks --
+# used to stop a handler snippet before it bleeds into the next route's code.
+_ANY_ROUTE_START_RES = (_EXPRESS_ROUTE_RE, _FASTAPI_DECORATOR_RE, _FLASK_ROUTE_RE, _FLASK_SHORTCUT_RE)
+
+
+def _route(
+    method: str,
+    path: str,
+    line: int,
+    has_auth: bool,
+    source: str,
+    middleware=None,
+    handler_snippet: str = "",
+):
     return {
         "method": method.upper(),
         "path": path,
         "line": line,
         "middleware": middleware or [],
         "has_auth_looking_middleware": has_auth,
+        "has_id_param": bool(ID_PARAM_RE.search(path)),
+        "handler_snippet": handler_snippet,
         "source_line": source,
     }
 
 
+def _snippet(lines: list[str], start_idx: int) -> str:
+    """The handler body following a route definition -- enough for the LLM
+    to actually read the code, not just guess from the path name.
+
+    Stops at the next route definition, OR at a comment line, OR at the
+    window limit, whichever comes first. Both boundary conditions matter:
+    without the route-start check, a short handler's snippet bleeds into
+    the next route's code; without the comment check, it bleeds into a
+    comment ABOUT the next route (e.g. "# Correctly protected contrast --
+    checks the owner_id..."), which the model then misreads as evidence of
+    a check that isn't actually in this route's own code. Both bugs were
+    caught by actually reading what the LLM was doing, not assumed.
+    """
+    collected = [lines[start_idx]]
+    for line in lines[start_idx + 1 : start_idx + _HANDLER_SNIPPET_LINES]:
+        stripped = line.strip()
+        if any(r.search(stripped) for r in _ANY_ROUTE_START_RES):
+            break
+        if stripped.startswith(("#", "//", "/*", "*")):
+            break
+        collected.append(line)
+    return "\n".join(collected)
+
+
 def _extract_express(text: str) -> list[dict[str, Any]]:
+    lines = text.splitlines()
     routes = []
-    for i, line in enumerate(text.splitlines(), start=1):
+    for i, line in enumerate(lines, start=1):
         m = _EXPRESS_ROUTE_RE.search(line.strip())
         if not m:
             continue
@@ -163,7 +212,9 @@ def _extract_express(text: str) -> list[dict[str, Any]]:
         middleware_blob = m.group("middleware").strip()
         middleware = [a.strip() for a in middleware_blob.split(",") if a.strip()]
         has_auth = any(_AUTH_LOOKING_NAMES.search(a) for a in middleware)
-        routes.append(_route(method, route_path, i, has_auth, line.strip(), middleware))
+        routes.append(
+            _route(method, route_path, i, has_auth, line.strip(), middleware, _snippet(lines, i - 1))
+        )
     return routes
 
 
@@ -180,11 +231,16 @@ def _extract_fastapi(text: str) -> list[dict[str, Any]]:
         if not m:
             continue
         method, route_path = m.group(1), m.group(2)
-        # Window: the decorator's own tail + up to the next 6 lines (the def
-        # and its parameter list), which is where Depends(...) auth appears.
-        window = m.group("rest") + "\n" + "\n".join(lines[i : i + 6])
+        # Window: the decorator's own tail + this route's own body (stops at
+        # the next route/comment -- see _snippet's docstring for why that
+        # boundary matters: an unbounded window here previously bled into
+        # the NEXT route's `Depends(get_current_user)` and wrongly marked
+        # THIS route as authenticated).
+        window = m.group("rest") + "\n" + _snippet(lines, i - 1)
         has_auth = bool(_AUTH_LOOKING_NAMES.search(window))
-        routes.append(_route(method, route_path, i, has_auth, line.strip()))
+        routes.append(
+            _route(method, route_path, i, has_auth, line.strip(), handler_snippet=_snippet(lines, i - 1))
+        )
     return routes
 
 
@@ -210,35 +266,36 @@ def _extract_flask(text: str) -> list[dict[str, Any]]:
             methods, route_path = [m.group(1).upper()], m.group(2)
 
         # Auth decorators sit in the stacked decorator block: a few lines
-        # above (other decorators) and just below (down to the def).
-        window = "\n".join(lines[max(0, i - 4) : i + 3])
+        # above (other decorators) and just below (down to the def). Bounded
+        # in both directions at the nearest route/blank-line/comment so this
+        # can't bleed into a neighbouring route's own decorators or body --
+        # the same class of bug fixed in _extract_fastapi above.
+        back = []
+        for line_back in reversed(lines[max(0, i - 5) : i - 1]):
+            s = line_back.strip()
+            if not s or any(r.search(s) for r in _ANY_ROUTE_START_RES):
+                break
+            back.insert(0, line_back)
+        window = "\n".join(back) + "\n" + _snippet(lines, i - 1)
         has_auth = bool(_AUTH_LOOKING_NAMES.search(window))
         for method in methods:
-            routes.append(_route(method, route_path, i, has_auth, stripped))
+            routes.append(
+                _route(method, route_path, i, has_auth, stripped, handler_snippet=_snippet(lines, i - 1))
+            )
     return routes
 
 
-_HYPOTHESIS_PROMPT = """You are a security reasoning assistant tracing routes \
-in a small {framework} web app to find candidates for a MISSING \
-AUTHENTICATION check.
+_HYPOTHESIS_PROMPT = """You are looking at ONE route from a small {framework} \
+web app.
 
-You will get a JSON list of routes, each with its method, path, and whether \
-any auth-related middleware / dependency / decorator is already attached.
+Route: {method} {path}
 
-Flag a route as a candidate ONLY if:
-- Its path suggests it returns sensitive or privileged data (e.g. contains \
-"admin", "user", "account", "profile", "order", "payment", "settings"), AND
-- It has NO auth attached (has_auth_looking_middleware is false).
+Does this path suggest it returns sensitive or privileged data -- for \
+example an admin panel, another user's data, an account, an order, a \
+payment, or settings? Judge ONLY the path, not whether it has authentication.
 
-Do NOT flag a route just because it's a GET request, and do NOT flag a route \
-that already has auth attached -- that one is fine.
-
-Respond with ONLY a JSON array (no prose), each item:
-{{"path": "...", "method": "...", "reason": "one short sentence"}}
-If no route qualifies, respond with an empty JSON array: []
-
-Routes:
-{routes_json}
+Respond with ONLY a JSON object, no prose:
+{{"looks_sensitive": true or false, "reason": "one short sentence"}}
 """
 
 
@@ -247,44 +304,94 @@ def hypothesize_missing_auth(
 ) -> list[dict[str, Any]]:
     """Ask the local LLM which routes look like missing-auth candidates.
 
+    Deliberately asks the model ONE direct question per route ("does the
+    path look sensitive?") rather than the compound "flag it if it looks
+    sensitive AND has no auth" -- that compound/negation prompt was
+    unreliable on this model (it flagged an already-protected route and
+    missed the actually vulnerable one). Whether auth is attached is
+    already known deterministically from static extraction
+    (has_auth_looking_middleware), so it's applied here in plain Python,
+    never asked of the model.
+
     Returns a list of {path, method, reason} -- candidates only, not yet
-    confirmed. Falls back to an empty list (never crashes the scan) if the
-    model output can't be parsed.
+    confirmed. A route the model can't be parsed for is skipped, never
+    crashes the scan.
     """
-    if not routes:
-        return []
-
-    routes_json = json.dumps(
-        [
-            {
-                "method": r["method"],
-                "path": r["path"],
-                "has_auth_looking_middleware": r["has_auth_looking_middleware"],
-            }
-            for r in routes
-        ],
-        indent=2,
-    )
-    prompt = _HYPOTHESIS_PROMPT.format(framework=framework, routes_json=routes_json)
-
-    try:
-        candidates = ask_json(prompt)
-    except Exception:
-        return []
-
-    if not isinstance(candidates, list):
-        return []
-
-    # Only keep candidates that actually match a real extracted route --
-    # never trust the model's path/method verbatim without cross-checking.
-    known = {(r["method"], r["path"]) for r in routes}
-    confirmed_candidates = []
-    for c in candidates:
-        if not isinstance(c, dict):
+    candidates = []
+    for r in routes:
+        if r["has_auth_looking_middleware"]:
+            continue  # already known to be fine -- don't even ask the model
+        prompt = _HYPOTHESIS_PROMPT.format(
+            framework=framework, method=r["method"], path=r["path"]
+        )
+        try:
+            result = ask_json(prompt)
+        except Exception:
             continue
-        key = (str(c.get("method", "")).upper(), c.get("path", ""))
-        if key in known:
-            confirmed_candidates.append(
-                {"method": key[0], "path": key[1], "reason": c.get("reason", "")}
+        if isinstance(result, dict) and result.get("looks_sensitive"):
+            candidates.append(
+                {"method": r["method"], "path": r["path"], "reason": result.get("reason", "")}
             )
-    return confirmed_candidates
+    return candidates
+
+
+_IDOR_HYPOTHESIS_PROMPT = """You are reading ONE route handler from a small \
+{framework} web app.
+
+Route: {method} {path}
+
+Handler source code:
+```
+{handler_snippet}
+```
+
+Look ONLY at the code above. Does it compare the looked-up record's owner to \
+the logged-in caller before returning it? For example: checking `.ownerId`, \
+`.owner_id`, `.userId`, or `user_id` against the current user's id.
+
+Respond with ONLY a JSON object, no prose:
+{{"has_ownership_check": true or false, "evidence": "quote the exact comparison line, or empty string if none"}}
+"""
+
+
+def hypothesize_idor(
+    routes: list[dict[str, Any]], framework: str = "express"
+) -> list[dict[str, Any]]:
+    """Ask the local LLM which id-param routes look like IDOR candidates,
+    based on actually reading the handler code for a missing ownership check.
+
+    Deliberately asks the model ONE direct factual question per route
+    ("does an ownership check exist?") rather than the compound "flag it if
+    the check does NOT exist" -- that negation was unreliable on this model
+    (it repeatedly flagged the route that DID have the check and missed the
+    one that didn't). The candidate decision itself (missing_auth check ==
+    False) is computed here in plain Python, not by the model.
+
+    Returns a list of {path, method, reason} -- candidates only, not yet
+    confirmed. A route the model can't be parsed for is skipped, never
+    crashes the scan.
+    """
+    id_routes = [r for r in routes if r.get("has_id_param")]
+    candidates = []
+    for r in id_routes:
+        prompt = _IDOR_HYPOTHESIS_PROMPT.format(
+            framework=framework,
+            method=r["method"],
+            path=r["path"],
+            handler_snippet=r["handler_snippet"],
+        )
+        try:
+            result = ask_json(prompt)
+        except Exception:
+            continue
+        if not isinstance(result, dict):
+            continue
+        if not result.get("has_ownership_check"):
+            candidates.append(
+                {
+                    "method": r["method"],
+                    "path": r["path"],
+                    "reason": "No ownership check found on this id-looked-up record.",
+                }
+            )
+    return candidates

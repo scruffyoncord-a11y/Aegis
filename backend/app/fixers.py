@@ -21,6 +21,7 @@ from app.detectors.dependencies import scan_dependencies
 from app.detectors.routes import extract_routes
 from app.detectors.secrets import scan_secrets
 from app.detectors.supabase import scan_supabase
+from app.probes.idor import run_idor_probe
 from app.probes.missing_auth import run_missing_auth_probe
 from app.sandbox import SandboxBuildError, SandboxUnavailable
 
@@ -39,6 +40,7 @@ _DETECTOR_FOR_TYPE: dict[str, Callable[[str], list[dict[str, Any]]]] = {
     "dependency-missing": scan_dependencies,
     "cloud-misconfig": _scan_cloud_all,
     "missing-auth": run_missing_auth_probe,
+    "idor": run_idor_probe,
 }
 
 
@@ -341,6 +343,125 @@ def _fix_missing_auth(finding: dict, work: Path, original: Path) -> tuple[dict[s
     return {entry_file: _unified(entry_file, before, after)}, note
 
 
+def _fix_idor(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
+    """Reuses an existing ownership-check pattern found elsewhere in the same
+    file, on a route that looks up a resource variable of the SAME name --
+    the same "reuse what the app already does correctly" approach as the
+    missing-auth fixer. If no sibling check exists to copy, fails
+    honestly rather than inventing a field name that might not exist.
+    """
+    framework = finding.get("framework", "express")
+    entry_file = finding.get("entry_file", "app.js")
+    target = work / entry_file
+    if not target.exists():
+        return {}, "Could not locate the app's entry file to patch."
+
+    text = target.read_text(encoding="utf-8")
+    routes = extract_routes(str(work), entry_file, framework)
+    method, _, path = finding["match"].partition(" ")
+    target_route = next(
+        (r for r in routes if r["method"] == method and r["path"] == path), None
+    )
+    if target_route is None:
+        return {}, "Could not re-locate the vulnerable route to patch."
+
+    lines = target.read_text(encoding="utf-8").splitlines(keepends=True)
+    idx = target_route["line"] - 1
+    before = "".join(lines)
+
+    if framework == "express":
+        var_match = re.search(r"const\s+(\w+)\s*=\s*\w+\.find\(", target_route["handler_snippet"])
+        guard = _find_express_ownership_guard(text, var_match.group(1)) if var_match else None
+        if not guard:
+            return {}, "No existing ownership check on this resource found elsewhere in the app to reuse -- add one manually, then re-scan."
+        # Express's not-found check is one line (`if (!order) return ...;`),
+        # so the indent to match and the line to insert after are the same line.
+        indent_from = insert_after = _line_index_of(
+            lines, r"if\s*\(!" + re.escape(var_match.group(1)) + r"\)", idx
+        )
+    elif framework == "fastapi":
+        var_match = re.search(r"(\w+)\s*=\s*next\(", target_route["handler_snippet"])
+        guard = _find_fastapi_ownership_guard(text, var_match.group(1)) if var_match else None
+        if not guard:
+            return {}, "No existing ownership check on this resource found elsewhere in the app to reuse -- add one manually, then re-scan."
+        # FastAPI's not-found check is a 2-line block (`if order is None:` /
+        # `    raise HTTPException(...)`). The new guard must be inserted
+        # AFTER the raise (not right after the `if` line, which would nest
+        # it INSIDE that if-block and crash on a None order), but indented
+        # to match the `if` line's level, not the more-indented raise line.
+        indent_from = _line_index_of(
+            lines, r"if\s+" + re.escape(var_match.group(1)) + r"\s+is\s+None", idx
+        )
+        insert_after = (
+            _line_index_of(lines, r"raise\s+HTTPException", indent_from)
+            if indent_from is not None
+            else None
+        )
+    else:
+        return {}, f"No IDOR fixer for framework '{framework}'."
+
+    if insert_after is None or indent_from is None:
+        return {}, "Could not find where in the handler to insert the ownership check."
+
+    # The captured guard text still carries ITS OWN original indentation
+    # from wherever it was copied from -- strip that first, then reapply a
+    # clean, consistent indent relative to the target location (the first
+    # line at the target's own level, every line after it one level deeper).
+    # Without this, the two indents compound (target indent + source
+    # indent), producing valid-but-ugly, inconsistently indented output.
+    indent = re.match(r"\s*", lines[indent_from]).group(0)
+    stripped_guard_lines = [ln.strip() for ln in guard.splitlines()]
+    guard_lines = [f"{indent}{stripped_guard_lines[0]}\n"]
+    for ln in stripped_guard_lines[1:-1]:
+        guard_lines.append(f"{indent}    {ln}\n")  # inner lines: one level deeper
+    if len(stripped_guard_lines) > 1:
+        last = stripped_guard_lines[-1]
+        # A lone closing bracket (Express's `}`) aligns with the opening
+        # line, not the inner statement; anything else stays one level in.
+        last_indent = indent if last in ("}", ")", "});") else f"{indent}    "
+        guard_lines.append(f"{last_indent}{last}\n")
+    lines[insert_after + 1 : insert_after + 1] = guard_lines
+
+    after = "".join(lines)
+    target.write_text(after, encoding="utf-8")
+    return (
+        {entry_file: _unified(entry_file, before, after)},
+        "Added the ownership check another route in this app already uses on the same resource.",
+    )
+
+
+def _line_index_of(lines: list[str], pattern: str, from_idx: int) -> int | None:
+    """The index of the first line matching pattern, searching forward from
+    from_idx (used to find the "not found" guard's closing line, right
+    after which the ownership check belongs)."""
+    for i in range(from_idx, min(from_idx + 10, len(lines))):
+        if re.search(pattern, lines[i]):
+            return i
+    return None
+
+
+def _find_express_ownership_guard(text: str, var_name: str) -> str | None:
+    """An existing `if (VAR.field !== ...) { return res.status(403)...}`
+    block elsewhere in the file, for the same resource variable name."""
+    m = re.search(
+        rf"if\s*\({re.escape(var_name)}\.\w+\s*!==?\s*[^)]+\)\s*\{{\s*"
+        rf"return\s+res\.status\(403\)[^\n]*\n\s*\}}",
+        text,
+    )
+    return m.group(0) if m else None
+
+
+def _find_fastapi_ownership_guard(text: str, var_name: str) -> str | None:
+    """An existing `if VAR["field"] != ...: raise HTTPException(403, ...)`
+    block elsewhere in the file, for the same resource variable name."""
+    m = re.search(
+        rf'if\s+{re.escape(var_name)}\[[^\]]+\]\s*!=\s*[^\n:]+:\s*\n\s*'
+        rf"raise HTTPException\(status_code=403[^\n]*\)",
+        text,
+    )
+    return m.group(0) if m else None
+
+
 def _find_fastapi_auth(text: str) -> str | None:
     """The name inside an existing Depends(...) that looks auth-related."""
     for m in re.finditer(r"Depends\(\s*(\w+)\s*\)", text):
@@ -365,6 +486,7 @@ _BUILDERS: dict[str, Callable[[dict, Path, Path], tuple[dict[str, str], str]]] =
     "dependency-missing": _fix_dependency_missing,
     "cloud-misconfig": _fix_cloud_misconfig,
     "missing-auth": _fix_missing_auth,
+    "idor": _fix_idor,
 }
 
 

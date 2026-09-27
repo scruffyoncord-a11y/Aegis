@@ -35,7 +35,9 @@ from app.github_oauth import (
 )
 from app import risk
 from app.llm import explain_finding
-from app.probes.missing_auth import NoSupportedEntryPoint, run_missing_auth_probe
+from app.probes.agent import NoSupportedEntryPoint, run_active_probes
+from app.probes.idor import IDOR_TOOL
+from app.probes.missing_auth import MISSING_AUTH_TOOL
 from app.sandbox import SandboxBuildError, SandboxUnavailable
 
 SESSION_COOKIE = "aegis_session"
@@ -168,7 +170,7 @@ def _run_probe(repo_path: str, progress: Callable[[str], None]) -> dict:
     guessing, and it is reported as "could not check", never as "clean".
     """
     try:
-        findings = run_missing_auth_probe(repo_path, on_stage=progress)
+        findings = run_active_probes(repo_path, [MISSING_AUTH_TOOL, IDOR_TOOL], on_stage=progress)
     except (SandboxUnavailable, SandboxBuildError, NoSupportedEntryPoint) as e:
         return {"findings": [], "skipped": True, "reason": str(e)}
 

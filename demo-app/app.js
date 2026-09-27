@@ -8,6 +8,7 @@
  *
  * Flaw #1 (Phase 1): a hardcoded secret committed directly in code.
  * Flaw #2 (Phase 4-5): an admin route with no auth check at all.
+ * Flaw #3 (Phase 6, IDOR): an order route that checks auth but not ownership.
  */
 
 const express = require("express");
@@ -31,6 +32,15 @@ const users = [
   { id: 2, name: "Bob", email: "bob@example.com", ssn: "987-65-4321" },
 ];
 
+// Orders belonging to different users -- the fixed test identity below
+// ("demo-valid-token") represents user id 1, so it should only ever be able
+// to read order 1, never order 2. (Small sequential ids on purpose: Aegis's
+// IDOR probe tries ids 1 and 2 as a general heuristic against any repo.)
+const orders = [
+  { id: 1, ownerId: 1, item: "Widget A", total: 42.5 },
+  { id: 2, ownerId: 2, item: "Widget B", total: 17.0 },
+];
+
 app.get("/", (req, res) => {
   res.send("Aegis demo target is running.");
 });
@@ -44,6 +54,27 @@ app.get("/api/profile", requireAuth, (req, res) => {
 // --- PLANTED FLAW: no auth middleware at all on a sensitive admin route ---
 app.get("/api/admin/users", (req, res) => {
   res.json({ users });
+});
+
+// --- PLANTED FLAW (IDOR): requires auth, but never checks that the order
+// actually belongs to the caller -- any logged-in user can read anyone's
+// order just by changing the id in the URL.
+app.get("/api/orders/:id", requireAuth, (req, res) => {
+  const order = orders.find((o) => o.id === Number(req.params.id));
+  if (!order) return res.status(404).json({ error: "Not found" });
+  res.json({ order });
+});
+
+// Correctly protected contrast -- checks the order's ownerId against the
+// caller before returning it, so the reasoning step has to discriminate.
+app.get("/api/my-order/:id", requireAuth, (req, res) => {
+  const CALLER_USER_ID = 1; // the fixed test identity "demo-valid-token" represents user 1
+  const order = orders.find((o) => o.id === Number(req.params.id));
+  if (!order) return res.status(404).json({ error: "Not found" });
+  if (order.ownerId !== CALLER_USER_ID) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  res.json({ order });
 });
 
 app.listen(3001, () => {
