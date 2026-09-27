@@ -85,24 +85,37 @@ def _unified(rel_path: str, before: str, after: str) -> str:
 
 def _fix_secret(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
     rel = finding["file"]
-    # Detector may prefix the path with the source dir; _resolve_in falls back
-    # to a basename search so either form works.
-    target = _resolve_in(work, rel) or _resolve_in(work, Path(rel).name)
+    target = _resolve_in(work, rel, original)
     if target is None:
         return {}, "Could not locate the file to patch."
 
-    secret = finding["match"]
+    # "match" is gitleaks' whole matched LINE (e.g. `TOKEN = "abc"`), not the
+    # secret value alone -- searching for that wrapped in quotes can never
+    # match anything real in the source. "secret_value" (added alongside
+    # "match" in detectors/secrets.py) is the actual value to replace; fall
+    # back to "match" only for a finding built by something else that never
+    # set it, rather than failing outright.
+    secret = finding.get("secret_value") or finding["match"]
     before = target.read_text(encoding="utf-8")
+    is_python = target.suffix == ".py"
 
-    # Derive an env var name from `const NAME = "secret"` if present.
+    # Derive an env var name from `const NAME = "secret"` (JS/TS) or a bare
+    # `NAME = "secret"` (Python has no declaration keyword) if present.
     var_match = re.search(
-        r"(?:const|let|var)\s+([A-Z0-9_]+)\s*=\s*[\"']" + re.escape(secret),
+        r"(?:(?:const|let|var)\s+)?([A-Z][A-Z0-9_]*)\s*=\s*[\"']" + re.escape(secret),
         before,
     )
     env_name = var_match.group(1) if var_match else "SECRET_VALUE"
 
-    after = before.replace(f'"{secret}"', f"process.env.{env_name}")
-    after = after.replace(f"'{secret}'", f"process.env.{env_name}")
+    # The replacement has to be valid in whatever language `target` actually
+    # is -- `process.env.NAME` is JS/TS syntax, and writing that into a .py
+    # file would produce a fix that "verifies" (the literal secret is gone)
+    # but doesn't run.
+    replacement = f'os.environ["{env_name}"]' if is_python else f"process.env.{env_name}"
+    after = before.replace(f'"{secret}"', replacement)
+    after = after.replace(f"'{secret}'", replacement)
+    if is_python and replacement in after and "import os" not in after:
+        after = "import os\n" + after
     target.write_text(after, encoding="utf-8")
 
     diffs = {str(target.relative_to(work)): _unified(rel, before, after)}
@@ -139,7 +152,7 @@ def _fix_secret(finding: dict, work: Path, original: Path) -> tuple[dict[str, st
 
 
 def _fix_dependency_vuln(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
-    manifest = _resolve_in(work, finding["file"])
+    manifest = _resolve_in(work, finding["file"], original)
     if manifest is None:
         return {}, "Could not locate the manifest to patch."
     before = manifest.read_text(encoding="utf-8")
@@ -161,7 +174,7 @@ def _fix_dependency_vuln(finding: dict, work: Path, original: Path) -> tuple[dic
 
 
 def _fix_dependency_missing(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
-    manifest = _resolve_in(work, finding["file"])
+    manifest = _resolve_in(work, finding["file"], original)
     if manifest is None:
         return {}, "Could not locate the manifest to patch."
     before = manifest.read_text(encoding="utf-8")
@@ -184,7 +197,7 @@ def _fix_dependency_missing(finding: dict, work: Path, original: Path) -> tuple[
 
 
 def _fix_firebase_misconfig(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
-    target = _resolve_in(work, finding["file"])
+    target = _resolve_in(work, finding["file"], original)
     if target is None:
         return {}, "Could not locate the rules file to patch."
     before = target.read_text(encoding="utf-8")
@@ -212,7 +225,7 @@ def _fix_firebase_misconfig(finding: dict, work: Path, original: Path) -> tuple[
 
 
 def _fix_supabase_misconfig(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
-    target = _resolve_in(work, finding["file"])
+    target = _resolve_in(work, finding["file"], original)
     if target is None:
         return {}, "Could not locate the migration file to patch."
     before = target.read_text(encoding="utf-8")
@@ -490,9 +503,31 @@ _BUILDERS: dict[str, Callable[[dict, Path, Path], tuple[dict[str, str], str]]] =
 }
 
 
-def _resolve_in(root: Path, rel: str | Path) -> Path | None:
-    """Find a file under root by relative path or basename."""
+def _resolve_in(root: Path, rel: str | Path, original: Path | None = None) -> Path | None:
+    """Find a file under `root` (the disposable copy being patched) by
+    relative path or basename.
+
+    `rel` is usually root-relative already, but gitleaks (secrets.py) hands
+    back the FULL absolute path it was invoked against -- and `root / rel`
+    for an absolute `rel` silently discards `root` (that's plain pathlib
+    behaviour, not a typo), so the naive join used to resolve straight back
+    to a path in the ORIGINAL repo, which happened to exist too. A builder
+    that reads/writes that path is patching the wrong copy entirely -- the
+    "only ever a temp copy, verified before anything real is touched"
+    guarantee this whole module exists for. So: an absolute `rel` is first
+    translated to original-relative (then joined onto `root` normally); if
+    it isn't under `original` either, only then does this fall back to a
+    basename search.
+    """
     rel = Path(rel)
+    if rel.is_absolute():
+        if original is not None:
+            try:
+                rel = rel.relative_to(original)
+            except ValueError:
+                rel = Path(rel.name)
+        else:
+            rel = Path(rel.name)
     candidate = root / rel
     if candidate.exists():
         return candidate

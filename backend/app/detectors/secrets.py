@@ -88,6 +88,11 @@ def scan_secrets(repo_path: str) -> list[dict[str, Any]]:
                     "line": entry.get("StartLine"),
                     "rule": entry.get("RuleID"),
                     "match": entry.get("Match"),
+                    # The raw secret value alone, distinct from "match" (which
+                    # is gitleaks' whole matched line, e.g. `TOKEN = "abc"` --
+                    # good for display, but fixers.py needs just `abc` to find
+                    # and replace it in the source).
+                    "secret_value": entry.get("Secret"),
                     "severity": "high",
                 }
             )
