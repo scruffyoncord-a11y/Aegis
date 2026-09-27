@@ -272,26 +272,17 @@ def _fix_cloud_misconfig(finding: dict, work: Path, original: Path) -> tuple[dic
 
 
 def _fix_missing_auth(finding: dict, work: Path, original: Path) -> tuple[dict[str, str], str]:
+    """Dispatches by the target app's framework -- the fix shape differs per
+    framework (Express middleware arg, FastAPI Depends dependency, Flask
+    decorator), but all reuse the app's OWN existing auth rather than
+    inventing a function that doesn't exist."""
+    framework = finding.get("framework", "express")
     entry_file = finding.get("entry_file", "app.js")
     target = work / entry_file
     if not target.exists():
         return {}, "Could not locate the app's entry file to patch."
 
-    routes = extract_routes(str(work), entry_file)
-
-    # Reuse whatever auth middleware this codebase already uses elsewhere,
-    # rather than inventing a function name that doesn't exist.
-    auth_name = next(
-        (r["middleware"][0] for r in routes if r["has_auth_looking_middleware"]),
-        None,
-    )
-    if not auth_name:
-        return (
-            {},
-            "No existing auth middleware found elsewhere in this app to reuse -- "
-            "add one manually, then re-scan.",
-        )
-
+    routes = extract_routes(str(work), entry_file, framework)
     method, _, path = finding["match"].partition(" ")
     target_route = next(
         (r for r in routes if r["method"] == method and r["path"] == path), None
@@ -302,21 +293,70 @@ def _fix_missing_auth(finding: dict, work: Path, original: Path) -> tuple[dict[s
     lines = target.read_text(encoding="utf-8").splitlines(keepends=True)
     idx = target_route["line"] - 1
     before = "".join(lines)
+    text = before
 
-    lines[idx] = re.sub(
-        r"""(app\.\w+\s*\(\s*['"`][^'"`]+['"`]\s*,\s*)""",
-        rf"\g<1>{auth_name}, ",
-        lines[idx],
-        count=1,
-    )
+    if framework == "express":
+        auth_name = next(
+            (r["middleware"][0] for r in routes if r["has_auth_looking_middleware"]),
+            None,
+        )
+        if not auth_name:
+            return {}, "No existing auth middleware found in this app to reuse -- add one, then re-scan."
+        lines[idx] = re.sub(
+            r"""((?:app|router)\.\w+\s*\(\s*['"`][^'"`]+['"`]\s*,\s*)""",
+            rf"\g<1>{auth_name}, ",
+            lines[idx],
+            count=1,
+        )
+        note = f"Added the existing `{auth_name}` middleware to this route -- the same check other protected routes use."
+
+    elif framework == "fastapi":
+        auth_name = _find_fastapi_auth(text)
+        if not auth_name:
+            return {}, "No existing FastAPI auth dependency (Depends(...)) found in this app to reuse -- add one, then re-scan."
+        # Insert `, dependencies=[Depends(<name>)]` before the decorator's closing ")".
+        lines[idx] = re.sub(
+            r"""(@\s*(?:app|router)\.\w+\s*\(\s*['"][^'"]+['"])(\s*\))""",
+            rf"\g<1>, dependencies=[Depends({auth_name})]\g<2>",
+            lines[idx],
+            count=1,
+        )
+        note = f"Added `dependencies=[Depends({auth_name})]` to this route -- the same dependency other protected routes use."
+
+    elif framework == "flask":
+        auth_name = _find_flask_auth(text)
+        if not auth_name:
+            return {}, "No existing Flask auth decorator (@login_required etc.) found in this app to reuse -- add one, then re-scan."
+        # Stack the auth decorator right below the route decorator (Flask
+        # requires it between the route decorator and the function).
+        indent = re.match(r"\s*", lines[idx]).group(0)
+        lines.insert(idx + 1, f"{indent}@{auth_name}\n")
+        note = f"Added the existing `@{auth_name}` decorator to this route -- the same check other protected routes use."
+
+    else:
+        return {}, f"No missing-auth fixer for framework '{framework}'."
+
     after = "".join(lines)
     target.write_text(after, encoding="utf-8")
+    return {entry_file: _unified(entry_file, before, after)}, note
 
-    return (
-        {entry_file: _unified(entry_file, before, after)},
-        f"Added the existing `{auth_name}` middleware to this route -- the same "
-        f"check other protected routes in this app already use.",
-    )
+
+def _find_fastapi_auth(text: str) -> str | None:
+    """The name inside an existing Depends(...) that looks auth-related."""
+    for m in re.finditer(r"Depends\(\s*(\w+)\s*\)", text):
+        name = m.group(1)
+        if re.search(r"auth|current_user|login|token|session|verify", name, re.IGNORECASE):
+            return name
+    return None
+
+
+def _find_flask_auth(text: str) -> str | None:
+    """The name of an existing auth-looking decorator (@login_required etc.)."""
+    for m in re.finditer(r"@\s*(\w+(?:_required)?)\b", text):
+        name = m.group(1)
+        if re.search(r"auth|login_required|jwt_required|token_required|requires_auth", name, re.IGNORECASE):
+            return name
+    return None
 
 
 _BUILDERS: dict[str, Callable[[dict, Path, Path], tuple[dict[str, str], str]]] = {

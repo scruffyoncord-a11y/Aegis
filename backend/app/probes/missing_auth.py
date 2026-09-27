@@ -17,52 +17,69 @@ from typing import Any, Callable
 
 import httpx
 
-from app.detectors.routes import extract_routes, find_entry_file, hypothesize_missing_auth
+from app.detectors.routes import (
+    detect_and_find_entry,
+    extract_routes,
+    hypothesize_missing_auth,
+)
 from app.sandbox import SandboxBuildError, SandboxUnavailable, run_sandbox
 
 _SUCCESS_STATUS = range(200, 300)
 
 _NOOP_STAGE: Callable[[str], None] = lambda _stage: None  # noqa: E731
 
+# The port each framework's app listens on INSIDE its container. Docker maps
+# it to a random free host port; this just has to match what the app binds.
+# Our demo Dockerfiles follow these conventions (Express 3001, uvicorn 8000,
+# Flask 5000).
+_PORT_FOR_FRAMEWORK = {"express": 3001, "fastapi": 8000, "flask": 5000}
+
 
 class NoSupportedEntryPoint(RuntimeError):
-    """Raised when the repo doesn't look like an Express app at all -- this
-    means the active probe genuinely could not check anything, which is a
+    """Raised when the repo doesn't look like a web app we can trace at all --
+    this means the active probe genuinely could not check anything, which is a
     different, more honest signal than "checked, found nothing"."""
 
 
 def run_missing_auth_probe(
     repo_path: str,
     entry_file: str | None = None,
-    container_port: int = 3001,
+    framework: str | None = None,
+    container_port: int | None = None,
     on_stage: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Full Phase 4-5 pipeline: trace routes -> hypothesize -> sandbox-probe.
+
+    Framework-aware: works on Express (JS), FastAPI and Flask (Python).
 
     Returns a list of CONFIRMED findings only. Candidates the probe
     couldn't confirm (e.g. the route actually was protected, contrary to
     the hypothesis) are silently dropped -- Aegis never reports something
     it could not verify as if it were certain.
 
-    Raises NoSupportedEntryPoint if this doesn't look like an Express app
-    (the active probe is currently Express-specific by design) -- callers
-    must surface this as "could not check", not as a clean result.
+    Raises NoSupportedEntryPoint if the repo doesn't look like a supported
+    web app -- callers must surface this as "could not check", not "clean".
     """
     stage = on_stage or _NOOP_STAGE
 
     stage("tracing")
-    if entry_file is None:
-        entry_file = find_entry_file(repo_path)
-        if entry_file is None:
+    if entry_file is None or framework is None:
+        found = detect_and_find_entry(repo_path)
+        if found is None:
             raise NoSupportedEntryPoint(
-                "No Express entry point (app.js/server.js/index.js) found "
-                "anywhere in this repo -- the active probe currently only "
-                "supports Node/Express apps."
+                "No supported web-app entry point found anywhere in this repo. "
+                "The active probe supports Express (app.js/server.js/index.js), "
+                "FastAPI and Flask (main.py/app.py/server.py)."
             )
-    routes = extract_routes(repo_path, entry_file)
+        entry_file, framework = found
+
+    if container_port is None:
+        container_port = _PORT_FOR_FRAMEWORK.get(framework, 3001)
+
+    routes = extract_routes(repo_path, entry_file, framework)
 
     stage("reasoning")
-    candidates = hypothesize_missing_auth(routes)
+    candidates = hypothesize_missing_auth(routes, framework)
     if not candidates:
         return []
 
@@ -73,7 +90,7 @@ def run_missing_auth_probe(
             return [
                 finding
                 for c in candidates
-                if (finding := _probe_one(base_url, c, entry_file)) is not None
+                if (finding := _probe_one(base_url, c, entry_file, framework)) is not None
             ]
     except (SandboxUnavailable, SandboxBuildError):
         # No Docker / no Dockerfile / build failed -> the active-probe stage
@@ -83,7 +100,7 @@ def run_missing_auth_probe(
 
 
 def _probe_one(
-    base_url: str, candidate: dict[str, Any], entry_file: str
+    base_url: str, candidate: dict[str, Any], entry_file: str, framework: str
 ) -> dict[str, Any] | None:
     method = candidate["method"]
     path = candidate["path"]
@@ -101,6 +118,7 @@ def _probe_one(
         "type": "missing-auth",
         "file": entry_file,
         "entry_file": entry_file,
+        "framework": framework,
         "line": None,
         "rule": "unauthenticated-sensitive-route",
         "match": f"{method} {path}",

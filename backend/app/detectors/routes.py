@@ -2,16 +2,20 @@
 
 Two steps, deliberately kept separate:
 
-1. Static extraction (`extract_routes`) -- deterministic regex parse of
-   Express route definitions. No LLM, no guessing: just facts (method, path,
-   the middleware/handler names in the call, the source line).
+1. Static extraction (`extract_routes`) -- deterministic regex parse of route
+   definitions. Framework-aware: Express (JS), FastAPI, and Flask (Python).
+   No LLM, no guessing: just facts (method, path, whether any auth-shaped
+   middleware / dependency / decorator is attached, the source line).
 
 2. Hypothesis (`hypothesize_missing_auth`) -- the local LLM reads those facts
-   plus the surrounding source and reasons like a pentester: "does this route
-   look like it should require authentication, and does it actually have any
-   auth-shaped middleware attached?" This produces CANDIDATES only -- nothing
-   here is a confirmed finding yet. Confirmation happens by actually probing
-   the route in a sandbox (see app/probes/missing_auth.py).
+   and reasons like a pentester: "does this route look like it should require
+   authentication, and does it actually have any auth attached?" This produces
+   CANDIDATES only -- nothing here is confirmed yet. Confirmation happens by
+   actually probing the route in a sandbox (see app/probes/missing_auth.py).
+
+The extraction is framework-specific; everything downstream (hypothesis,
+sandbox probe) works off the framework-neutral route list and real HTTP
+responses, so it needed no per-framework changes.
 """
 
 from __future__ import annotations
@@ -23,100 +27,211 @@ from typing import Any
 
 from app.llm import ask_json
 
-# Matches the START of an Express route definition: app.<method>('/path',
-# middleware1, middleware2, (req, res) => { ... -- deliberately stops at the
-# handler's own opening paren/keyword rather than requiring the whole
-# (usually multi-line) statement to close on the same line.
-_ROUTE_RE = re.compile(
-    r"""app\.(get|post|put|delete|patch)\s*\(\s*
+# --- Express (JS) --------------------------------------------------------- #
+
+# app.<method>('/path', middleware1, middleware2, (req, res) => { ...
+_EXPRESS_ROUTE_RE = re.compile(
+    r"""(?:app|router)\.(get|post|put|delete|patch)\s*\(\s*
         ['"`]([^'"`]+)['"`]\s*,\s*
         (?P<middleware>[\w\s,]*?)
         \s*,?\s*(?:\(|async\s*\(|function)""",
     re.VERBOSE,
 )
 
-# Heuristic names that suggest a handler argument is an auth check, not the
-# route's actual business-logic handler. Used only to pre-filter obvious
-# cases for the LLM -- the LLM makes the real call, this just gives it clean
-# structured facts to reason over instead of raw regex noise.
+# --- FastAPI (Python) ----------------------------------------------------- #
+
+# @app.get("/path")  /  @router.post("/path", dependencies=[...])
+_FASTAPI_DECORATOR_RE = re.compile(
+    r"""@\s*(?:app|router)\.(get|post|put|delete|patch)\s*\(\s*
+        ['"]([^'"]+)['"]
+        (?P<rest>[^\n]*)""",
+    re.VERBOSE,
+)
+
+# --- Flask (Python) ------------------------------------------------------- #
+
+# @app.route("/path", methods=["GET", "POST"])  /  @app.get("/path")
+_FLASK_ROUTE_RE = re.compile(
+    r"""@\s*(?:app|bp|blueprint)\.route\s*\(\s*['"]([^'"]+)['"]
+        (?P<rest>[^\n]*)""",
+    re.VERBOSE,
+)
+_FLASK_SHORTCUT_RE = re.compile(
+    r"""@\s*(?:app|bp|blueprint)\.(get|post|put|delete|patch)\s*\(\s*['"]([^'"]+)['"]""",
+    re.VERBOSE,
+)
+
+# Names that look like an auth check, across all three frameworks: Express
+# middleware, FastAPI Depends(...), Flask decorators (@login_required etc.).
 _AUTH_LOOKING_NAMES = re.compile(
-    r"auth|Auth|requireLogin|isLoggedIn|verifyToken|checkSession", re.IGNORECASE
+    r"auth|Auth|requireLogin|require_login|isLoggedIn|login_required|"
+    r"verifyToken|verify_token|checkSession|check_session|jwt_required|"
+    r"get_current_user|current_user|Security\(",
+    re.IGNORECASE,
 )
 
 _SKIP_DIRS = {"node_modules", ".git", ".next", "dist", "build", "__pycache__", "venv", ".venv"}
-_ENTRY_CANDIDATES = ("app.js", "server.js", "index.js")
+
+# Entry-file candidates per framework, and how to recognise the framework
+# from a file's own contents (so we don't mis-tag a Flask app as FastAPI).
+_JS_ENTRIES = ("app.js", "server.js", "index.js")
+_PY_ENTRIES = ("main.py", "app.py", "server.py", "api.py", "asgi.py", "wsgi.py")
 
 
-def find_entry_file(repo_path: str) -> str | None:
-    """Look for a plausible Express entry point anywhere in the repo (a
-    monorepo keeps its backend in a subfolder, e.g. backend/app.js), not
-    just the root. Returns a path relative to repo_path, or None if this
-    doesn't look like an Express app at all -- callers must treat that as
-    "could not check", never as "checked and clean".
-    """
-    root = Path(repo_path)
-    for name in _ENTRY_CANDIDATES:
-        matches = [
-            p
-            for p in root.rglob(name)
-            if not any(part in _SKIP_DIRS for part in p.relative_to(root).parts)
-        ]
-        if matches:
-            # Prefer the shallowest match (closest to repo root).
-            matches.sort(key=lambda p: len(p.relative_to(root).parts))
-            return str(matches[0].relative_to(root))
+def _framework_of(text: str) -> str | None:
+    if "FastAPI(" in text or re.search(r"from\s+fastapi\b", text):
+        return "fastapi"
+    if "Flask(" in text or re.search(r"from\s+flask\b", text):
+        return "flask"
+    if re.search(r"require\(['\"]express['\"]\)", text) or re.search(r"from\s+['\"]express['\"]", text):
+        return "express"
     return None
 
 
-def extract_routes(repo_path: str, entry_file: str = "app.js") -> list[dict[str, Any]]:
-    """Deterministic regex extraction of Express route definitions."""
+def detect_and_find_entry(repo_path: str) -> tuple[str, str] | None:
+    """Find an entry file AND its framework anywhere in the repo (a monorepo
+    keeps its backend in a subfolder). Returns (entry_file_rel, framework),
+    or None if nothing recognisable is found -- callers must treat None as
+    "could not check", never "checked and clean".
+    """
+    root = Path(repo_path)
+
+    def _search(names: tuple[str, ...], js_default: str | None):
+        for name in names:
+            matches = sorted(
+                (
+                    p
+                    for p in root.rglob(name)
+                    if not any(part in _SKIP_DIRS for part in p.relative_to(root).parts)
+                ),
+                key=lambda p: len(p.relative_to(root).parts),  # shallowest first
+            )
+            for p in matches:
+                try:
+                    fw = _framework_of(p.read_text(encoding="utf-8", errors="ignore"))
+                except OSError:
+                    continue
+                if fw:
+                    return str(p.relative_to(root)), fw
+                if js_default:  # a JS entry file we couldn't positively type -> assume express
+                    return str(p.relative_to(root)), js_default
+        return None
+
+    return _search(_PY_ENTRIES, None) or _search(_JS_ENTRIES, "express")
+
+
+# Backwards-compatible shim (older callers expected just the entry path).
+def find_entry_file(repo_path: str) -> str | None:
+    found = detect_and_find_entry(repo_path)
+    return found[0] if found else None
+
+
+def extract_routes(
+    repo_path: str, entry_file: str = "app.js", framework: str = "express"
+) -> list[dict[str, Any]]:
+    """Deterministic route extraction, dispatched by framework."""
     path = Path(repo_path) / entry_file
     if not path.exists():
         return []
+    text = path.read_text(encoding="utf-8")
 
-    routes: list[dict[str, Any]] = []
-    lines = path.read_text(encoding="utf-8").splitlines()
-    for i, line in enumerate(lines, start=1):
-        m = _ROUTE_RE.search(line.strip())
+    if framework == "fastapi":
+        return _extract_fastapi(text)
+    if framework == "flask":
+        return _extract_flask(text)
+    return _extract_express(text)
+
+
+def _route(method: str, path: str, line: int, has_auth: bool, source: str, middleware=None):
+    return {
+        "method": method.upper(),
+        "path": path,
+        "line": line,
+        "middleware": middleware or [],
+        "has_auth_looking_middleware": has_auth,
+        "source_line": source,
+    }
+
+
+def _extract_express(text: str) -> list[dict[str, Any]]:
+    routes = []
+    for i, line in enumerate(text.splitlines(), start=1):
+        m = _EXPRESS_ROUTE_RE.search(line.strip())
         if not m:
             continue
         method, route_path = m.group(1), m.group(2)
         middleware_blob = m.group("middleware").strip()
-        middleware_args = (
-            [a.strip() for a in middleware_blob.split(",") if a.strip()]
-            if middleware_blob
-            else []
-        )
-        has_auth_looking_middleware = any(
-            _AUTH_LOOKING_NAMES.search(a) for a in middleware_args
-        )
-        routes.append(
-            {
-                "method": method.upper(),
-                "path": route_path,
-                "line": i,
-                "middleware": middleware_args,
-                "has_auth_looking_middleware": has_auth_looking_middleware,
-                "source_line": line.strip(),
-            }
-        )
+        middleware = [a.strip() for a in middleware_blob.split(",") if a.strip()]
+        has_auth = any(_AUTH_LOOKING_NAMES.search(a) for a in middleware)
+        routes.append(_route(method, route_path, i, has_auth, line.strip(), middleware))
+    return routes
+
+
+def _extract_fastapi(text: str) -> list[dict[str, Any]]:
+    """FastAPI auth can live in the decorator (`dependencies=[Depends(...)]`)
+    OR in the handler's own signature (`user = Depends(get_current_user)`),
+    so for each route we inspect the decorator line plus the following few
+    lines of the function signature.
+    """
+    lines = text.splitlines()
+    routes = []
+    for i, line in enumerate(lines, start=1):
+        m = _FASTAPI_DECORATOR_RE.search(line.strip())
+        if not m:
+            continue
+        method, route_path = m.group(1), m.group(2)
+        # Window: the decorator's own tail + up to the next 6 lines (the def
+        # and its parameter list), which is where Depends(...) auth appears.
+        window = m.group("rest") + "\n" + "\n".join(lines[i : i + 6])
+        has_auth = bool(_AUTH_LOOKING_NAMES.search(window))
+        routes.append(_route(method, route_path, i, has_auth, line.strip()))
+    return routes
+
+
+def _extract_flask(text: str) -> list[dict[str, Any]]:
+    """Flask auth is usually a separate decorator line (`@login_required`)
+    stacked with the route decorator, so we scan a small window of lines
+    around each route decorator for auth-looking decorators.
+    """
+    lines = text.splitlines()
+    routes = []
+    for i, line in enumerate(lines, start=1):
+        stripped = line.strip()
+
+        m = _FLASK_ROUTE_RE.search(stripped)
+        if m:
+            route_path, rest = m.group(1), m.group("rest")
+            methods = re.findall(r"['\"](GET|POST|PUT|DELETE|PATCH)['\"]", rest, re.IGNORECASE)
+            methods = [x.upper() for x in methods] or ["GET"]
+        else:
+            m = _FLASK_SHORTCUT_RE.search(stripped)
+            if not m:
+                continue
+            methods, route_path = [m.group(1).upper()], m.group(2)
+
+        # Auth decorators sit in the stacked decorator block: a few lines
+        # above (other decorators) and just below (down to the def).
+        window = "\n".join(lines[max(0, i - 4) : i + 3])
+        has_auth = bool(_AUTH_LOOKING_NAMES.search(window))
+        for method in methods:
+            routes.append(_route(method, route_path, i, has_auth, stripped))
     return routes
 
 
 _HYPOTHESIS_PROMPT = """You are a security reasoning assistant tracing routes \
-in a small Express app to find candidates for a MISSING AUTHENTICATION check.
+in a small {framework} web app to find candidates for a MISSING \
+AUTHENTICATION check.
 
-You will get a JSON list of routes, each with its method, path, the \
-middleware/handler names in its definition, and whether any of those names \
-already look auth-related.
+You will get a JSON list of routes, each with its method, path, and whether \
+any auth-related middleware / dependency / decorator is already attached.
 
 Flag a route as a candidate ONLY if:
 - Its path suggests it returns sensitive or privileged data (e.g. contains \
 "admin", "user", "account", "profile", "order", "payment", "settings"), AND
-- It has NO auth-looking middleware attached.
+- It has NO auth attached (has_auth_looking_middleware is false).
 
 Do NOT flag a route just because it's a GET request, and do NOT flag a route \
-that already has an auth-looking middleware -- that one is fine.
+that already has auth attached -- that one is fine.
 
 Respond with ONLY a JSON array (no prose), each item:
 {{"path": "...", "method": "...", "reason": "one short sentence"}}
@@ -127,7 +242,9 @@ Routes:
 """
 
 
-def hypothesize_missing_auth(routes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def hypothesize_missing_auth(
+    routes: list[dict[str, Any]], framework: str = "express"
+) -> list[dict[str, Any]]:
     """Ask the local LLM which routes look like missing-auth candidates.
 
     Returns a list of {path, method, reason} -- candidates only, not yet
@@ -142,14 +259,13 @@ def hypothesize_missing_auth(routes: list[dict[str, Any]]) -> list[dict[str, Any
             {
                 "method": r["method"],
                 "path": r["path"],
-                "middleware": r["middleware"],
                 "has_auth_looking_middleware": r["has_auth_looking_middleware"],
             }
             for r in routes
         ],
         indent=2,
     )
-    prompt = _HYPOTHESIS_PROMPT.format(routes_json=routes_json)
+    prompt = _HYPOTHESIS_PROMPT.format(framework=framework, routes_json=routes_json)
 
     try:
         candidates = ask_json(prompt)
