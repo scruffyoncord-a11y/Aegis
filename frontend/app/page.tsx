@@ -323,7 +323,12 @@ export default function Home() {
   const [probeResult, setProbeResult] = useState<ProbeResponse | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
 
-  async function handleScan() {
+  // Both take an optional explicit path so they can be called right after a
+  // repo is connected, using the fresh value directly -- calling them via
+  // the repoPath STATE at that point would still see the old value, since
+  // setRepoPath's update hasn't landed yet on the same tick.
+  async function handleScan(path?: string) {
+    const target = path ?? repoPath;
     setScanOverlayOpen(true);
     setScanStage(0);
     setScanFinished(false);
@@ -332,7 +337,7 @@ export default function Home() {
       const res = await fetch(`${API}/scan/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo_path: repoPath }),
+        body: JSON.stringify({ repo_path: target }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await readStream<ScanResponse>(res, (s) => {
@@ -347,7 +352,8 @@ export default function Home() {
     }
   }
 
-  async function handleProbe() {
+  async function handleProbe(path?: string) {
+    const target = path ?? repoPath;
     setProbeOverlayOpen(true);
     setProbeStage(0);
     setProbeFinished(false);
@@ -356,7 +362,7 @@ export default function Home() {
       const res = await fetch(`${API}/probe/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo_path: repoPath }),
+        body: JSON.stringify({ repo_path: target }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await readStream<ProbeResponse>(res, (s) => {
@@ -369,6 +375,18 @@ export default function Home() {
     } finally {
       setProbeFinished(true);
     }
+  }
+
+  // As soon as a repo is connected, start both checks immediately -- no
+  // extra button click needed. They run one after another (not in
+  // parallel): both use the one shared local model, and the probe also
+  // needs Docker, so overlapping the two would just contend for the same
+  // resources rather than actually go faster.
+  async function handleConnected(path: string) {
+    setRepoPath(path);
+    setRepoConnected(true);
+    await handleScan(path);
+    await handleProbe(path);
   }
 
   const combinedRisk = mergeRisk(scanResult?.risk ?? null, probeResult?.risk ?? null);
@@ -392,12 +410,7 @@ export default function Home() {
       </p>
 
       <div className="mt-6">
-        <GitHubConnect
-          onConnected={(path) => {
-            setRepoPath(path);
-            setRepoConnected(true);
-          }}
-        />
+        <GitHubConnect onConnected={handleConnected} />
       </div>
 
       {repoConnected && (
@@ -410,7 +423,7 @@ export default function Home() {
         />
         <button
           type="button"
-          onClick={handleScan}
+          onClick={() => handleScan()}
           disabled={scanOverlayOpen}
           className="rounded-lg bg-blue-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:opacity-50"
         >
@@ -418,7 +431,7 @@ export default function Home() {
         </button>
         <button
           type="button"
-          onClick={handleProbe}
+          onClick={() => handleProbe()}
           disabled={probeOverlayOpen}
           title="AI-hypothesized, sandbox-confirmed missing-auth check. Builds and runs the repo's own Dockerfile."
           className="rounded-lg bg-fuchsia-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-fuchsia-500 disabled:opacity-50"

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -130,6 +132,33 @@ def get_token(session_id: str | None) -> str | None:
     return session["access_token"] if session else None
 
 
+def set_cloned_repo(session_id: str, path: str) -> None:
+    """Remember which local clone belongs to this session, and delete the
+    PREVIOUS one first if the user connects a different repo -- otherwise
+    every "Verify & Clone" leaves a permanent leftover directory in Temp,
+    since nothing else ever cleaned these up."""
+    session = _sessions.get(session_id)
+    if session is None:
+        return
+    _delete_cloned_repo(session)
+    session["cloned_repo_path"] = path
+
+
+def _delete_cloned_repo(session: dict[str, Any]) -> None:
+    old_path = session.get("cloned_repo_path")
+    if not old_path:
+        return
+    # The clone lives at <tmp>/<repo-name>; remove the whole parent temp dir
+    # (created by tempfile.mkdtemp in github_auth.clone_repo), not just the
+    # inner folder.
+    shutil.rmtree(Path(old_path).parent, ignore_errors=True)
+    session["cloned_repo_path"] = None
+
+
 def clear_session(session_id: str | None) -> None:
-    if session_id:
-        _sessions.pop(session_id, None)
+    if not session_id:
+        return
+    session = _sessions.get(session_id)
+    if session is not None:
+        _delete_cloned_repo(session)
+    _sessions.pop(session_id, None)

@@ -32,6 +32,7 @@ from app.github_oauth import (
     get_session,
     get_token,
     handle_callback,
+    set_cloned_repo,
 )
 from app import risk
 from app.llm import explain_finding
@@ -285,6 +286,11 @@ def github_verify_and_clone(
         local_path = clone_repo(req.repo_url, token, branch=result.get("default_branch"))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Clone failed: {e}") from e
+
+    # Track this clone against the session so it gets deleted if the user
+    # connects a different repo or disconnects -- previously nothing ever
+    # cleaned these up, leaving a permanent leftover folder in Temp per clone.
+    set_cloned_repo(aegis_session, str(local_path))
 
     return {
         "verified": True,
