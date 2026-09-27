@@ -14,6 +14,11 @@ const DWELL_REDUCED_MS = 250;
 const HOLD_DONE_MS = 700; // the finished state is shown briefly before the overlay leaves
 const EXIT_MS = 280;
 
+// How many AnalysisOverlays are currently mounted (module-level, shared by
+// every instance) -- see the scroll-lock effect below for why this can't
+// just be a save/restore of body.style.overflow per instance.
+let openOverlayCount = 0;
+
 /**
  * A full-window overlay, centred over a blurred page, that swipes through the steps of a running check.
  *
@@ -66,15 +71,22 @@ export function AnalysisOverlay({
   }, [leaving, reduceMotion]);
 
   // While it is open: the page behind cannot be scrolled or focused, and focus moves into the dialog.
+  // Two overlays can briefly overlap (one still playing its exit animation
+  // when the next one opens, e.g. Scan -> Probe firing back to back), so a
+  // naive save/restore of body.style.overflow is wrong: the second overlay
+  // would capture "hidden" (the first overlay's own lock) as "previous" and
+  // restore that on unmount, leaving scroll permanently locked. A shared
+  // open-count avoids that -- only the transition to/from zero touches it.
   useEffect(() => {
     const main = document.querySelector("main");
     main?.setAttribute("inert", "");
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    openOverlayCount += 1;
+    if (openOverlayCount === 1) document.body.style.overflow = "hidden";
     dialogRef.current?.focus();
     return () => {
       main?.removeAttribute("inert");
-      document.body.style.overflow = previousOverflow;
+      openOverlayCount -= 1;
+      if (openOverlayCount === 0) document.body.style.overflow = "";
     };
   }, []);
 
