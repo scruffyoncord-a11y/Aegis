@@ -93,31 +93,42 @@ def detect_and_find_entry(repo_path: str) -> tuple[str, str] | None:
     keeps its backend in a subfolder). Returns (entry_file_rel, framework),
     or None if nothing recognisable is found -- callers must treat None as
     "could not check", never "checked and clean".
+
+    Candidates from BOTH languages are pooled and tried SHALLOWEST-first,
+    never Python-before-JS regardless of depth -- a root-level app.js is far
+    more likely to be the app someone would actually deploy than some
+    unrelated server.py three folders deep that happens to share a common
+    entry-point filename (a small nested utility script, a test fixture,
+    etc.). Trying one language's names across the whole tree before ever
+    looking at the other's used to mean a single stray server.py anywhere
+    could permanently hide a repo's real, root-level Express app.
     """
     root = Path(repo_path)
 
-    def _search(names: tuple[str, ...], js_default: str | None):
+    def _candidates(names: tuple[str, ...]) -> list[Path]:
+        found = []
         for name in names:
-            matches = sorted(
-                (
-                    p
-                    for p in root.rglob(name)
-                    if not any(part in _SKIP_DIRS for part in p.relative_to(root).parts)
-                ),
-                key=lambda p: len(p.relative_to(root).parts),  # shallowest first
+            found.extend(
+                p
+                for p in root.rglob(name)
+                if not any(part in _SKIP_DIRS for part in p.relative_to(root).parts)
             )
-            for p in matches:
-                try:
-                    fw = _framework_of(p.read_text(encoding="utf-8", errors="ignore"))
-                except OSError:
-                    continue
-                if fw:
-                    return str(p.relative_to(root)), fw
-                if js_default:  # a JS entry file we couldn't positively type -> assume express
-                    return str(p.relative_to(root)), js_default
-        return None
+        return found
 
-    return _search(_PY_ENTRIES, None) or _search(_JS_ENTRIES, "express")
+    candidates = _candidates(_PY_ENTRIES) + _candidates(_JS_ENTRIES)
+    candidates.sort(key=lambda p: len(p.relative_to(root).parts))  # shallowest first
+
+    for p in candidates:
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        fw = _framework_of(text)
+        if fw:
+            return str(p.relative_to(root)), fw
+        if p.name in _JS_ENTRIES:  # a JS entry file we couldn't positively type -> assume express
+            return str(p.relative_to(root)), "express"
+    return None
 
 
 # Backwards-compatible shim (older callers expected just the entry path).

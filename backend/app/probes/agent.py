@@ -79,7 +79,7 @@ def run_active_probes(
     stage("sandbox")
     findings: list[dict[str, Any]] = []
     try:
-        with run_sandbox_auto(repo_path, container_port) as base_url:
+        with run_sandbox_auto(repo_path, container_port, entry_file=entry_file) as base_url:
             stage("probing")
             for tool, candidates in tool_candidates:
                 for candidate in candidates:

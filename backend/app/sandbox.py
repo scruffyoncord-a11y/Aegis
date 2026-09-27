@@ -108,11 +108,16 @@ def run_sandbox(repo_path: str, container_port: int) -> Iterator[str]:
             pass
 
 
-def run_sandbox_auto(repo_path: str, container_port: int):
+def run_sandbox_auto(repo_path: str, container_port: int, entry_file: str | None = None):
     """Like run_sandbox, but if the repo has no Dockerfile, tries a
     best-effort model-synthesized one first (see app/dockerfile_inference.py)
     before giving up. A repo-provided Dockerfile always wins outright --
     inference is a fallback, never a replacement for it.
+
+    `entry_file` (the one route-tracing already picked) scopes the
+    inference's signal collection to that app's own directory, so a repo
+    that's mainly one app but happens to also contain an unrelated nested
+    script doesn't get its signals mixed across both.
 
     Returns a context manager, same as run_sandbox -- use with `with ... as
     base_url:`.
@@ -122,7 +127,7 @@ def run_sandbox_auto(repo_path: str, container_port: int):
 
     from app.dockerfile_inference import infer_dockerfile  # local import: keep the LLM dependency out of sandbox.py's module load unless actually needed
 
-    inferred = infer_dockerfile(repo_path)
+    inferred = infer_dockerfile(repo_path, entry_file)
     if inferred is None:
         raise SandboxUnavailable(
             f"No Dockerfile in {repo_path!r}, and the local model could not "

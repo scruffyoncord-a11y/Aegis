@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.detectors.routes import _JS_ENTRIES, _PY_ENTRIES
 from app.llm import ask_json
 
 _SKIP_DIRS = {"node_modules", ".git", ".next", "dist", "build", "__pycache__", "venv", ".venv"}
@@ -36,9 +37,34 @@ _SIGNAL_FILES = (
     "Procfile",
 )
 
+# The same "this directory looks like its own app root" vocabulary
+# detect_and_find_entry() already uses to pick an entry point.
+_APP_ENTRY_NAMES = set(_PY_ENTRIES) | set(_JS_ENTRIES) | {"Dockerfile"}
 
-def _collect_signals(repo_path: str) -> str:
+
+def _collect_signals(repo_path: str, entry_file: str | None = None) -> str:
+    """Reads build/dependency signal files from the repo, EXCLUDING any
+    directory that looks like its own independent app root (has its own
+    app.js/main.py/etc.) other than the one the caller says it actually
+    picked (`entry_file`'s own directory).
+
+    Without this, a repo that's mainly one app but happens to also contain
+    an unrelated nested script sharing a common entry-point filename (e.g. a
+    small Flask tool tucked into an Express app's public/ folder) gets its
+    signals mixed across both -- the model is then asked to write ONE
+    Dockerfile for what are really two unrelated apps, and correctly
+    declines, the same failure mode as a real frontend/+backend/ monorepo
+    (see subprojects.py). Scoping to the entry point's own directory is what
+    fixes that, the same way subdirectory targeting fixes the monorepo case.
+    """
     root = Path(repo_path)
+    entry_dir = (root / Path(entry_file).parent).resolve() if entry_file else root.resolve()
+
+    def _is_other_app_dir(p: Path) -> bool:
+        if p.resolve() == entry_dir:
+            return False
+        return any((p / name).is_file() for name in _APP_ENTRY_NAMES)
+
     parts = []
     for name in _SIGNAL_FILES:
         matches = sorted(
@@ -46,6 +72,7 @@ def _collect_signals(repo_path: str) -> str:
                 p
                 for p in root.rglob(name)
                 if not any(part in _SKIP_DIRS for part in p.relative_to(root).parts)
+                and not _is_other_app_dir(p.parent)
             ),
             key=lambda p: len(p.relative_to(root).parts),  # shallowest first
         )
@@ -80,13 +107,16 @@ Respond with ONLY a JSON object, no prose:
 """
 
 
-def infer_dockerfile(repo_path: str) -> tuple[str, int] | None:
+def infer_dockerfile(repo_path: str, entry_file: str | None = None) -> tuple[str, int] | None:
     """Ask the local model to synthesize a Dockerfile from the repo's own
     build/dependency signals. Returns (dockerfile_text, port), or None if
     there was nothing to reason about or the model wouldn't/couldn't guess
     -- callers must treat None the same as "no Dockerfile available".
+
+    `entry_file` (the same one route-tracing already picked, if any) scopes
+    signal collection to that app's own directory -- see _collect_signals.
     """
-    signals = _collect_signals(repo_path)
+    signals = _collect_signals(repo_path, entry_file)
     if not signals.strip():
         return None
 
