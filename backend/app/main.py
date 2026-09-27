@@ -40,6 +40,7 @@ from app.probes.agent import NoSupportedEntryPoint, run_active_probes
 from app.probes.idor import IDOR_TOOL
 from app.probes.missing_auth import MISSING_AUTH_TOOL
 from app.sandbox import SandboxBuildError, SandboxUnavailable
+from app.subprojects import find_subprojects
 
 SESSION_COOKIE = "aegis_session"
 
@@ -299,4 +300,9 @@ def github_verify_and_clone(
         "permission": result["permission"],
         "private": result["private"],
         "repo_path": str(local_path),
+        # If this is a monorepo (e.g. separate frontend/ + backend/ services),
+        # the frontend lets the user pick which one to point Aegis at --
+        # asking the model to infer one Dockerfile for two unrelated apps at
+        # once doesn't work, but each service alone is just a normal repo.
+        "subprojects": find_subprojects(str(local_path)),
     }

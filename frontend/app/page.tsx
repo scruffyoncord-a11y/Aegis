@@ -145,7 +145,13 @@ function GitHubConnect({ onConnected }: { onConnected: (path: string) => void })
   const [query, setQuery] = useState("");
   const [cloningRepo, setCloningRepo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [cloned, setCloned] = useState<{ owner: string; repo: string; permission: string; private: boolean } | null>(null);
+  const [cloned, setCloned] = useState<{ owner: string; repo: string; permission: string; private: boolean; subpath: string } | null>(null);
+  // Set right after clone when the repo looks like a monorepo (more than one
+  // candidate service directory) -- holds everything needed to finish
+  // connecting once the user picks which one to point Aegis at.
+  const [choosingSubproject, setChoosingSubproject] = useState<{
+    repo_path: string; owner: string; repo: string; permission: string; private: boolean; subprojects: string[];
+  } | null>(null);
 
   async function refreshStatus() {
     try {
@@ -193,13 +199,29 @@ function GitHubConnect({ onConnected }: { onConnected: (path: string) => void })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-      setCloned(data);
-      onConnected(data.repo_path);
+      const subprojects: string[] = data.subprojects ?? ["."];
+      if (subprojects.length > 1) {
+        // Monorepo -- ask which service to point Aegis at instead of
+        // guessing. Everything else (the connected banner, auto-scan) is
+        // deferred until confirmSubproject runs.
+        setChoosingSubproject({ ...data, subprojects });
+      } else {
+        setCloned({ ...data, subpath: "." });
+        onConnected(data.repo_path);
+      }
     } catch (e) {
       setError(String(e));
     } finally {
       setCloningRepo(null);
     }
+  }
+
+  function confirmSubproject(subpath: string) {
+    if (!choosingSubproject) return;
+    const fullPath = subpath === "." ? choosingSubproject.repo_path : `${choosingSubproject.repo_path}/${subpath}`;
+    setCloned({ ...choosingSubproject, subpath });
+    setChoosingSubproject(null);
+    onConnected(fullPath);
   }
 
   const filtered = (repos ?? []).filter((r) => r.full_name.toLowerCase().includes(query.toLowerCase()));
@@ -210,7 +232,8 @@ function GitHubConnect({ onConnected }: { onConnected: (path: string) => void })
     return (
       <div className="tg-card flex items-center justify-between gap-3 p-4 text-sm">
         <span className="text-emerald-600 dark:text-emerald-400">
-          Connected -- {cloned.owner}/{cloned.repo} ({cloned.permission} access{cloned.private ? ", private" : ""})
+          Connected -- {cloned.owner}/{cloned.repo}
+          {cloned.subpath !== "." && <> ({cloned.subpath}/)</>} ({cloned.permission} access{cloned.private ? ", private" : ""})
         </span>
         <button
           type="button"
@@ -220,6 +243,30 @@ function GitHubConnect({ onConnected }: { onConnected: (path: string) => void })
           Change repo
         </button>
       </div>
+    );
+  }
+
+  if (choosingSubproject) {
+    return (
+      <Card title="Which part of this repo do you want to test?">
+        <p className="text-sm text-zinc-600 dark:text-zinc-300">
+          {choosingSubproject.owner}/{choosingSubproject.repo} looks like it has more than one service (e.g. a separate
+          frontend and backend). Aegis sandboxes and probes one service at a time -- pick which directory to point it at.
+        </p>
+        <ul className="mt-3 space-y-1">
+          {choosingSubproject.subprojects.map((sub) => (
+            <li key={sub}>
+              <button
+                type="button"
+                onClick={() => confirmSubproject(sub)}
+                className="tg-card flex w-full items-center justify-between gap-2 !rounded-lg px-3 py-2 text-left text-sm"
+              >
+                <span>{sub === "." ? "Whole repo (root)" : `${sub}/`}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </Card>
     );
   }
 
