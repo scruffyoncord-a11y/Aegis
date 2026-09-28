@@ -99,6 +99,12 @@ Rules:
 - Use a small, standard base image (python:3.12-slim, node:20-slim, etc.)
 - Install dependencies, copy the app, then CMD to start it
 - Bind to 0.0.0.0, not localhost/127.0.0.1, so it's reachable from outside the container
+- If a COPY's source is a wildcard or matches more than one file (e.g. \
+`package*.json`), its destination MUST be a directory ending in `/` -- \
+write `COPY package*.json ./`, never `COPY package*.json .` (Docker \
+rejects that build: "the destination must be a directory and end with \
+a /"). A single, exact source file (e.g. `COPY requirements.txt .`) is \
+fine either way.
 - If you genuinely can't tell how to start this app from what's shown, say so \
 instead of guessing wildly
 
