@@ -47,14 +47,18 @@ const POINTS: Record<SandboxState, { title: string; items: string[] }> = {
   },
 };
 
-/** A corner badge that says, honestly, whether the sandbox actually ran the current probe. */
+/** Sits inline in the page header, next to the title -- says, honestly,
+ * whether the sandbox actually ran the current probe. Its info panel is
+ * absolutely positioned off ITS OWN corner (not the viewport), so it drops
+ * down over the page instead of pushing the header's layout around when
+ * opened. */
 export function SandboxBadge({ state }: { state: SandboxState }) {
   const [open, setOpen] = useState(false);
   const look = LOOK[state];
   const info = POINTS[state];
   const Icon = state === "active" ? ShieldCheck : state === "off" ? ShieldAlert : LockKeyhole;
   return (
-    <div className="no-print fixed right-4 top-4 z-40 flex flex-col items-end gap-2 sm:right-8" onMouseLeave={() => setOpen(false)}>
+    <div className="no-print relative z-40 shrink-0" onMouseLeave={() => setOpen(false)}>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -68,7 +72,7 @@ export function SandboxBadge({ state }: { state: SandboxState }) {
         {look.label}
       </button>
       {open && (
-        <div id="sandbox-info" role="status" className="tg-card w-80 p-4 text-sm">
+        <div id="sandbox-info" role="status" className="tg-card absolute right-0 top-full mt-2 w-80 p-4 text-sm">
           <p className="font-semibold">{info.title}</p>
           <ul className="mt-2 list-disc space-y-1 pl-5 text-zinc-700 dark:text-zinc-300">
             {info.items.map((t) => (

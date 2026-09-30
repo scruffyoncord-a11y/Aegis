@@ -552,12 +552,15 @@ export default function Home() {
 
   return (
     <main className="w-full px-10 py-10">
-      <SandboxBadge state={sandboxState} />
-
-      <h1 className="text-3xl font-bold">Aegis</h1>
-      <p className="mt-1 text-zinc-600 dark:text-zinc-300">
-        AI pentesting agent -- Observe &rarr; Detect &rarr; Explain &rarr; Respond
-      </p>
+      <header className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold">Aegis</h1>
+          <p className="mt-1 text-zinc-600 dark:text-zinc-300">
+            AI pentesting agent -- Observe &rarr; Detect &rarr; Explain &rarr; Respond
+          </p>
+        </div>
+        <SandboxBadge state={sandboxState} />
+      </header>
 
       <div className="mt-6">
         <GitHubConnect onConnected={handleConnected} />
