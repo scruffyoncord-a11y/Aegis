@@ -37,6 +37,7 @@ from app.github_oauth import (
     set_cloned_repo,
 )
 from app import risk
+from app.hunch import evaluate_hunch
 from app.llm import explain_finding
 from app.probes.agent import NoSupportedEntryPoint, run_active_probes
 from app.probes.idor import IDOR_TOOL
@@ -84,6 +85,21 @@ class CloneRequest(BaseModel):
 
 class CancelRequest(BaseModel):
     run_id: str
+
+
+class ProbeRequest(BaseModel):
+    repo_path: str
+    # The free-text lead from "Test a Hunch" -- optional, absent for a
+    # normal Re-run pentest.
+    hint: str | None = None
+
+
+class HunchRequest(BaseModel):
+    hint: str
+    # Findings already gathered this session (scan + probe combined) --
+    # sent by the frontend rather than re-fetched here, since the caller
+    # already has them and this endpoint never re-runs anything itself.
+    findings: list[dict[str, Any]]
 
 
 @app.get("/health")
@@ -193,6 +209,7 @@ def _run_probe(
     repo_path: str,
     progress: Callable[[str], None],
     cancel_event: threading.Event | None = None,
+    user_hint: str | None = None,
 ) -> dict:
     """Phase 4-5: AI-hypothesized, sandbox-confirmed active probe.
 
@@ -202,6 +219,10 @@ def _run_probe(
     guessing, and it is reported as "could not check", never as "clean".
     A user-requested cancel (see app/cancellation.py) is reported the same
     honest way: "skipped", never as an error and never as "clean".
+
+    `user_hint` is "Test a Hunch"'s free-text lead -- passed through to bias
+    the hypothesis step (see run_active_probes), not evaluated here; the
+    /hunch endpoint judges the hunch against the final findings afterward.
     """
     # Filled in by on_sandbox_ready the moment the container is confirmed
     # live -- a plain dict so the closure below can write into it (Python
@@ -221,6 +242,7 @@ def _run_probe(
             on_stage=progress,
             cancel_event=cancel_event,
             on_sandbox_ready=capture_screenshot,
+            user_hint=user_hint,
         )
     except Cancelled as e:
         return {"findings": [], "skipped": True, "cancelled": True, "reason": str(e)}
@@ -255,12 +277,12 @@ def _run_probe(
 
 
 @app.post("/probe")
-def probe(req: ScanRequest) -> dict:
-    return _run_probe(req.repo_path, lambda _stage: None)
+def probe(req: ProbeRequest) -> dict:
+    return _run_probe(req.repo_path, lambda _stage: None, user_hint=req.hint)
 
 
 @app.post("/probe/stream")
-def probe_stream(req: ScanRequest) -> StreamingResponse:
+def probe_stream(req: ProbeRequest) -> StreamingResponse:
     """Same as /probe, reported stage-by-stage as newline-delimited JSON.
 
     Mints a run id up front and sends it in the very first ("started")
@@ -272,11 +294,21 @@ def probe_stream(req: ScanRequest) -> StreamingResponse:
 
     def work(progress: Callable[[str], None]) -> dict:
         try:
-            return _run_probe(req.repo_path, progress, cancel_event=cancel_event)
+            return _run_probe(req.repo_path, progress, cancel_event=cancel_event, user_hint=req.hint)
         finally:
             finish_run(run_id)
 
     return _ndjson_stream(work, extra_started={"run_id": run_id})
+
+
+@app.post("/hunch")
+def hunch(req: HunchRequest) -> dict:
+    """"Test a Hunch": judges the user's free-text lead against findings
+    already gathered this session (scan + probe combined, sent by the
+    caller) -- never re-runs anything itself, and says outright when the
+    hunch isn't something Aegis's checks can test at all.
+    """
+    return evaluate_hunch(req.hint, req.findings)
 
 
 @app.post("/probe/cancel")

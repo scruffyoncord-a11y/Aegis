@@ -19,6 +19,7 @@ import { DownloadReport } from "../download-report";
 import { classify, summarise } from "./mock-risk";
 import {
   FindingCard,
+  HunchModal,
   PROBE_STEPS,
   RepoTree,
   SCAN_STEPS,
@@ -28,7 +29,7 @@ import {
 } from "../page";
 import { RiskDashboard } from "../risk-dashboard";
 import { SandboxBadge, type SandboxState } from "../sandbox-badge";
-import type { Finding, FixResult, ProbeResponse, ScanResponse } from "../types";
+import type { Finding, FixResult, HunchResult, ProbeResponse, ScanResponse } from "../types";
 
 const DEMO_REPO_PATH = "acme/webapp (demo)";
 
@@ -202,6 +203,11 @@ export default function DemoPage() {
   const [probeFinished, setProbeFinished] = useState(false);
   const [probeResult, setProbeResult] = useState<ProbeResponse | null>(null);
 
+  const [hunchModalOpen, setHunchModalOpen] = useState(false);
+  const [hunchAsked, setHunchAsked] = useState<string | null>(null);
+  const [hunchResult, setHunchResult] = useState<HunchResult | null>(null);
+  const [hunchEvaluating, setHunchEvaluating] = useState(false);
+
   async function playStages(
     steps: { key: string }[],
     setStage: (i: number) => void,
@@ -222,13 +228,74 @@ export default function DemoPage() {
     setScanFinished(true);
   }
 
-  async function runProbe() {
+  async function runProbe(): Promise<ProbeResponse> {
     setProbeOverlayOpen(true);
     setProbeStage(0);
     setProbeFinished(false);
     await playStages(PROBE_STEPS, setProbeStage, 600);
-    setProbeResult(buildProbeResult());
+    const result = buildProbeResult();
+    setProbeResult(result);
     setProbeFinished(true);
+    return result;
+  }
+
+  // A stand-in for the real /hunch endpoint's LLM judgment: keyword-matches
+  // the hint against categories this demo's canned findings actually cover,
+  // so "Test a Hunch" still demonstrates all three real outcomes (confirmed
+  // / not found / not testable) without a backend call.
+  const _NOT_TESTABLE_HINTS = ["xss", "injection", "sql", "csrf", "rate limit", "business logic", "price", "discount"];
+  const _CATEGORY_KEYWORDS: { words: string[]; type: string }[] = [
+    { words: ["admin", "auth", "login", "permission"], type: "missing-auth" },
+    { words: ["order", "idor", "another user", "other user", "someone else"], type: "idor" },
+    { words: ["secret", "key", "credential", "token", "aws"], type: "secret" },
+    { words: ["depend", "package", "express", "lodash", "vulnerable"], type: "dependency-vuln" },
+  ];
+
+  async function evaluateHunchMock(hintText: string, findings: Finding[]): Promise<HunchResult> {
+    await delay(900); // feels like a real model call
+    const lower = hintText.toLowerCase();
+    if (_NOT_TESTABLE_HINTS.some((w) => lower.includes(w))) {
+      return {
+        testable: false,
+        confirmed: null,
+        explanation: "This is outside what Aegis's current checks can verify -- it doesn't test business logic, injection, or client-side issues like this.",
+      };
+    }
+    const category = _CATEGORY_KEYWORDS.find((c) => c.words.some((w) => lower.includes(w)));
+    if (!category) {
+      return {
+        testable: false,
+        confirmed: null,
+        explanation: "Not sure this maps to any check Aegis currently runs -- try phrasing it around auth, access control, secrets, or dependencies.",
+      };
+    }
+    const match = findings.find((f) => f.type === category.type);
+    if (match) {
+      return {
+        testable: true,
+        confirmed: true,
+        explanation: `Confirmed -- ${match.type}: ${match.match} (${match.file ?? "no specific file"}). This matches what you suspected.`,
+      };
+    }
+    return {
+      testable: true,
+      confirmed: false,
+      explanation: "This is something Aegis can test for, but nothing in this run's confirmed findings matches it -- that area looks clean.",
+    };
+  }
+
+  async function submitHunch(hintText: string) {
+    setHunchModalOpen(false);
+    setHunchAsked(hintText);
+    setHunchResult(null);
+    const freshProbe = await runProbe();
+    const combined = [...(scanResult?.findings ?? []), ...(freshProbe.findings ?? [])];
+    setHunchEvaluating(true);
+    try {
+      setHunchResult(await evaluateHunchMock(hintText, combined));
+    } finally {
+      setHunchEvaluating(false);
+    }
   }
 
   async function pickRepo(name: string) {
@@ -256,6 +323,9 @@ export default function DemoPage() {
     setProbeOverlayOpen(false);
     setProbeFinished(false);
     setProbeResult(null);
+    setHunchModalOpen(false);
+    setHunchAsked(null);
+    setHunchResult(null);
   }
 
   const combinedRisk = mergeRisk(scanResult?.risk ?? null, probeResult?.risk ?? null);
@@ -293,17 +363,19 @@ export default function DemoPage() {
               </button>
               <button
                 type="button"
-                onClick={runProbe}
+                onClick={() => setHunchModalOpen(true)}
                 disabled={probeOverlayOpen}
                 className="rounded-lg bg-zinc-900 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
               >
-                {probeOverlayOpen ? "Pentesting…" : "Re-run pentest"}
+                {probeOverlayOpen ? "Pentesting…" : "Test a Hunch"}
               </button>
             </div>
           )}
           <SandboxBadge state={sandboxState} />
         </div>
       </header>
+
+      {hunchModalOpen && <HunchModal onCancel={() => setHunchModalOpen(false)} onSubmit={submitHunch} />}
 
       <div className="mt-6">
         {connected ? (
@@ -396,6 +468,39 @@ export default function DemoPage() {
       {combinedRisk && (
         <div className="mt-6 space-y-6">
           <RiskDashboard risk={combinedRisk} />
+
+          {hunchAsked && (
+            <Card title="Your Hunch">
+              <p className="text-sm text-zinc-500">You asked Aegis to specifically check:</p>
+              <p className="mt-1 text-sm font-medium text-zinc-800 dark:text-zinc-100">&ldquo;{hunchAsked}&rdquo;</p>
+              {hunchEvaluating ? (
+                <p className="mt-3 text-sm text-zinc-500">Checking your hunch against what this run actually found&hellip;</p>
+              ) : hunchResult ? (
+                <div className="mt-3">
+                  <span
+                    className={`inline-block rounded px-2.5 py-0.5 text-xs font-bold text-white ${
+                      hunchResult.testable === null
+                        ? "bg-zinc-500"
+                        : !hunchResult.testable
+                          ? "bg-amber-500"
+                          : hunchResult.confirmed
+                            ? "bg-red-600"
+                            : "bg-emerald-600"
+                    }`}
+                  >
+                    {hunchResult.testable === null
+                      ? "COULD NOT EVALUATE"
+                      : !hunchResult.testable
+                        ? "NOT TESTABLE HERE"
+                        : hunchResult.confirmed
+                          ? "CONFIRMED"
+                          : "NOT FOUND"}
+                  </span>
+                  <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{hunchResult.explanation}</p>
+                </div>
+              ) : null}
+            </Card>
+          )}
 
           {probeResult?.screenshot && (
             <Card title="What we actually tested">

@@ -62,3 +62,12 @@ export type ProbeResponse = {
    * sandboxed container at all, e.g. the Supabase-probe fallback path). */
   screenshot?: string | null;
 };
+
+/** Result of POST /hunch -- "Test a Hunch"'s verdict on a user-supplied
+ * lead. `testable`/`confirmed` are null only when the model couldn't be
+ * reached at all; show that as "couldn't evaluate", never as "not found". */
+export type HunchResult = {
+  testable: boolean | null;
+  confirmed: boolean | null;
+  explanation: string;
+};

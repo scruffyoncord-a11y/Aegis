@@ -43,6 +43,7 @@ def run_active_probes(
     on_stage: Callable[[str], None] | None = None,
     cancel_event: threading.Event | None = None,
     on_sandbox_ready: Callable[[str], None] | None = None,
+    user_hint: str | None = None,
 ) -> list[dict[str, Any]]:
     """Trace once, hypothesize per tool, confirm every tool's candidates
     inside ONE shared sandbox (so a multi-tool run only pays the Docker
@@ -57,6 +58,10 @@ def run_active_probes(
     "what did we actually test" screenshot without this module needing to
     know anything about screenshots itself. Any exception it raises is
     swallowed: a preview failing must never break the actual probe.
+
+    `user_hint` is the free-text lead from "Test a Hunch" -- passed straight
+    through to every tool's own hypothesize(), which decides for itself
+    whether/how to use it (see detectors/routes.py's hypothesize_*).
     """
     stage = on_stage or _NOOP_STAGE
 
@@ -88,7 +93,7 @@ def run_active_probes(
     stage("reasoning")
     tool_candidates: list[tuple[Tool, list[dict[str, Any]]]] = []
     for tool in tools:
-        candidates = tool.hypothesize(routes, framework)
+        candidates = tool.hypothesize(routes, framework, user_hint)
         if candidates:
             tool_candidates.append((tool, candidates))
 

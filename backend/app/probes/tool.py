@@ -14,9 +14,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-# hypothesize(routes, framework) -> candidate dicts (must carry enough info
-# for this Tool's own probe() to act on -- typically at least method/path).
-Hypothesize = Callable[[list[dict[str, Any]], str], list[dict[str, Any]]]
+# hypothesize(routes, framework, user_hint) -> candidate dicts (must carry
+# enough info for this Tool's own probe() to act on -- typically at least
+# method/path). user_hint is the free-text lead a user typed in via "Test a
+# Hunch" (None otherwise) -- a Tool may fold it into its own reasoning
+# prompt as extra context; it never becomes a required argument callers must
+# pass something real for.
+Hypothesize = Callable[[list[dict[str, Any]], str, "str | None"], list[dict[str, Any]]]
 
 # probe(base_url, candidate, entry_file, framework) -> a confirmed finding
 # dict, or None if the candidate could not be confirmed (e.g. it turned out

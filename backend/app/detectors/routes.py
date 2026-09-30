@@ -300,7 +300,7 @@ _HYPOTHESIS_PROMPT = """You are looking at ONE route from a small {framework} \
 web app.
 
 Route: {method} {path}
-
+{hint_block}
 Does this path suggest it returns sensitive or privileged data -- for \
 example an admin panel, another user's data, an account, an order, a \
 payment, or settings? Judge ONLY the path, not whether it has authentication.
@@ -309,9 +309,20 @@ Respond with ONLY a JSON object, no prose:
 {{"looks_sensitive": true or false, "reason": "one short sentence"}}
 """
 
+# Appended into a hypothesis prompt when the user supplied a hunch -- kept as
+# EXTRA CONTEXT for a still-single factual question, never a second condition
+# to AND/OR against (see both hypothesize_* docstrings: a compound question
+# was unreliable on this model). The route is still judged on its own merits;
+# the hunch just gives the model something to weigh it against.
+_HINT_BLOCK = """
+The developer connected this repo specifically suspecting: "{hint}"
+If this route looks related to that, weigh it accordingly -- but still \
+judge it honestly even if it doesn't relate at all.
+"""
+
 
 def hypothesize_missing_auth(
-    routes: list[dict[str, Any]], framework: str = "express"
+    routes: list[dict[str, Any]], framework: str = "express", user_hint: str | None = None
 ) -> list[dict[str, Any]]:
     """Ask the local LLM which routes look like missing-auth candidates.
 
@@ -324,16 +335,21 @@ def hypothesize_missing_auth(
     (has_auth_looking_middleware), so it's applied here in plain Python,
     never asked of the model.
 
+    `user_hint`, if given (the "Test a Hunch" feature), is folded in as
+    extra context per route -- see _HINT_BLOCK for why it can't become a
+    second condition in the question itself.
+
     Returns a list of {path, method, reason} -- candidates only, not yet
     confirmed. A route the model can't be parsed for is skipped, never
     crashes the scan.
     """
+    hint_block = _HINT_BLOCK.format(hint=user_hint) if user_hint else ""
     candidates = []
     for r in routes:
         if r["has_auth_looking_middleware"]:
             continue  # already known to be fine -- don't even ask the model
         prompt = _HYPOTHESIS_PROMPT.format(
-            framework=framework, method=r["method"], path=r["path"]
+            framework=framework, method=r["method"], path=r["path"], hint_block=hint_block
         )
         try:
             result = ask_json(prompt)
@@ -350,7 +366,7 @@ _IDOR_HYPOTHESIS_PROMPT = """You are reading ONE route handler from a small \
 {framework} web app.
 
 Route: {method} {path}
-
+{hint_block}
 Handler source code:
 ```
 {handler_snippet}
@@ -366,7 +382,7 @@ Respond with ONLY a JSON object, no prose:
 
 
 def hypothesize_idor(
-    routes: list[dict[str, Any]], framework: str = "express"
+    routes: list[dict[str, Any]], framework: str = "express", user_hint: str | None = None
 ) -> list[dict[str, Any]]:
     """Ask the local LLM which id-param routes look like IDOR candidates,
     based on actually reading the handler code for a missing ownership check.
@@ -378,10 +394,15 @@ def hypothesize_idor(
     one that didn't). The candidate decision itself (missing_auth check ==
     False) is computed here in plain Python, not by the model.
 
+    `user_hint`, if given (the "Test a Hunch" feature), is folded in as
+    extra context per route -- see _HINT_BLOCK for why it can't become a
+    second condition in the question itself.
+
     Returns a list of {path, method, reason} -- candidates only, not yet
     confirmed. A route the model can't be parsed for is skipped, never
     crashes the scan.
     """
+    hint_block = _HINT_BLOCK.format(hint=user_hint) if user_hint else ""
     id_routes = [r for r in routes if r.get("has_id_param")]
     candidates = []
     for r in id_routes:
@@ -390,6 +411,7 @@ def hypothesize_idor(
             method=r["method"],
             path=r["path"],
             handler_snippet=r["handler_snippet"],
+            hint_block=hint_block,
         )
         try:
             result = ask_json(prompt)

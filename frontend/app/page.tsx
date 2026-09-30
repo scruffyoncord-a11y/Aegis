@@ -8,7 +8,7 @@ import { DownloadReport } from "./download-report";
 import { API, readStream } from "./lib";
 import { RiskDashboard } from "./risk-dashboard";
 import { SandboxBadge, type SandboxState } from "./sandbox-badge";
-import type { Finding, FixResult, ProbeResponse, RiskSummary, ScanResponse } from "./types";
+import type { Finding, FixResult, HunchResult, ProbeResponse, RiskSummary, ScanResponse } from "./types";
 
 // Each entry's key must match a real "stage" event name the backend actually
 // emits (see backend/app/main.py::_run_scan / _run_probe) -- the overlay
@@ -169,6 +169,74 @@ export function RepoTree({ node, depth }: { node: TreeNode; depth: number }) {
         <RepoTree key={child.path || child.name} node={child} depth={depth + 1} />
       ))}
     </details>
+  );
+}
+
+/** "Test a Hunch": a small modal card, not the full AnalysisOverlay
+ * treatment -- this is a quick text prompt, not a multi-step process. States
+ * the check's real scope up front (what it CAN and CAN'T test) so a hunch
+ * about something outside that scope isn't a surprise later in the report. */
+export function HunchModal({
+  onCancel,
+  onSubmit,
+}: {
+  onCancel: () => void;
+  onSubmit: (hint: string) => void;
+}) {
+  const [text, setText] = useState("");
+  return (
+    <div className="no-print fixed inset-0 z-50 flex items-center justify-center bg-background/55 px-4 backdrop-blur-md" onClick={onCancel}>
+      <div className="tg-card w-full max-w-lg p-6" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-semibold">Test a Hunch</h2>
+        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-300">
+          Tell Aegis what you suspect might be wrong. It'll pay extra attention to that area during the pentest, then
+          tell you plainly whether it found something, or if it's not something these checks can test.
+        </p>
+
+        <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
+          <div className="tg-card !rounded-lg p-3">
+            <p className="font-semibold text-emerald-600 dark:text-emerald-400">Works best for</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4 text-zinc-600 dark:text-zinc-300">
+              <li>Missing authentication on a route</li>
+              <li>Broken access control / IDOR</li>
+              <li>Leaked secrets or API keys</li>
+              <li>Vulnerable or fake dependencies</li>
+              <li>Open Firebase/Supabase rules</li>
+            </ul>
+          </div>
+          <div className="tg-card !rounded-lg p-3">
+            <p className="font-semibold text-amber-600 dark:text-amber-400">Not testable here</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4 text-zinc-600 dark:text-zinc-300">
+              <li>Business logic bugs</li>
+              <li>XSS / SQL injection</li>
+              <li>Rate limiting, CSRF</li>
+            </ul>
+          </div>
+        </div>
+
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={'e.g. "I think the orders endpoint might let one user see another user\'s order"'}
+          rows={3}
+          className="mt-4 w-full rounded-lg border border-zinc-300 bg-transparent p-2 text-sm dark:border-zinc-700"
+        />
+
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={onCancel} className="rounded-lg px-4 py-1.5 text-sm font-semibold text-zinc-500 hover:underline">
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => text.trim() && onSubmit(text.trim())}
+            disabled={!text.trim()}
+            className="rounded-lg bg-zinc-900 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
+          >
+            Run it
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -451,6 +519,14 @@ export default function Home() {
   // pentest" button needs it to tell the backend which run to actually stop.
   const [probeRunId, setProbeRunId] = useState<string | null>(null);
 
+  // "Test a Hunch": the modal's open/closed state, the hunch actually
+  // submitted (shown in the report section once set), and its verdict once
+  // /hunch answers (null while that call is still in flight).
+  const [hunchModalOpen, setHunchModalOpen] = useState(false);
+  const [hunchAsked, setHunchAsked] = useState<string | null>(null);
+  const [hunchResult, setHunchResult] = useState<HunchResult | null>(null);
+  const [hunchEvaluating, setHunchEvaluating] = useState(false);
+
   // Both take an optional explicit path so they can be called right after a
   // repo is connected, using the fresh value directly -- calling them via
   // the repoPath STATE at that point would still see the old value, since
@@ -480,7 +556,12 @@ export default function Home() {
     }
   }
 
-  async function handleProbe(path?: string) {
+  // `hint` is "Test a Hunch"'s free-text lead (undefined for a normal
+  // re-run). Returns the fresh result directly -- a caller that needs it
+  // right after (submitHunch, below) can't rely on the probeResult STATE
+  // being updated yet in the same tick, the same staleness issue explicit
+  // path-passing already works around elsewhere in this file.
+  async function handleProbe(path?: string, hint?: string): Promise<ProbeResponse | undefined> {
     const target = path ?? repoPath;
     setProbeOverlayOpen(true);
     setProbeStage(0);
@@ -491,7 +572,7 @@ export default function Home() {
       const res = await fetch(`${API}/probe/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo_path: target }),
+        body: JSON.stringify({ repo_path: target, hint: hint ?? null }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await readStream<ProbeResponse>(
@@ -505,11 +586,44 @@ export default function Home() {
         },
       );
       setProbeResult(data);
+      return data;
     } catch (e) {
       setProbeError(String(e));
+      return undefined;
     } finally {
       setProbeFinished(true);
     }
+  }
+
+  async function evaluateHunch(hintText: string, findings: Finding[]) {
+    setHunchEvaluating(true);
+    try {
+      const res = await fetch(`${API}/hunch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hint: hintText, findings }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setHunchResult(await res.json());
+    } catch (e) {
+      setHunchResult({ testable: null, confirmed: null, explanation: `Could not evaluate this hunch right now: ${e}` });
+    } finally {
+      setHunchEvaluating(false);
+    }
+  }
+
+  // Re-runs the probe biased toward the user's hunch (see
+  // detectors/routes.py's hypothesize_* for how that biasing works), then
+  // judges the hunch against the FULL picture -- the existing scan findings
+  // plus this fresh probe's findings -- since a hunch about a leaked secret,
+  // say, can only ever be confirmed by the scan side, not the probe alone.
+  async function submitHunch(hintText: string) {
+    setHunchModalOpen(false);
+    setHunchAsked(hintText);
+    setHunchResult(null);
+    const freshProbe = await handleProbe(undefined, hintText);
+    const combined = [...(scanResult?.findings ?? []), ...(freshProbe?.findings ?? [])];
+    await evaluateHunch(hintText, combined);
   }
 
   // Closes the overlay immediately for instant feedback, and tells the
@@ -572,18 +686,20 @@ export default function Home() {
               </button>
               <button
                 type="button"
-                onClick={() => handleProbe()}
+                onClick={() => setHunchModalOpen(true)}
                 disabled={probeOverlayOpen}
-                title="AI-hypothesized, sandbox-confirmed missing-auth check. Builds and runs the repo's own Dockerfile."
+                title="Tell Aegis what you suspect, then watch it actually check -- confirmed, not found, or not something these checks can test."
                 className="rounded-lg bg-zinc-900 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
               >
-                {probeOverlayOpen ? "Pentesting…" : "Re-run pentest"}
+                {probeOverlayOpen ? "Pentesting…" : "Test a Hunch"}
               </button>
             </div>
           )}
           <SandboxBadge state={sandboxState} />
         </div>
       </header>
+
+      {hunchModalOpen && <HunchModal onCancel={() => setHunchModalOpen(false)} onSubmit={submitHunch} />}
 
       <div className="mt-6">
         <GitHubConnect onConnected={handleConnected} />
@@ -616,6 +732,39 @@ export default function Home() {
       {combinedRisk && (
         <div className="mt-6 space-y-6">
           <RiskDashboard risk={combinedRisk} />
+
+          {hunchAsked && (
+            <Card title="Your Hunch">
+              <p className="text-sm text-zinc-500">You asked Aegis to specifically check:</p>
+              <p className="mt-1 text-sm font-medium text-zinc-800 dark:text-zinc-100">&ldquo;{hunchAsked}&rdquo;</p>
+              {hunchEvaluating ? (
+                <p className="mt-3 text-sm text-zinc-500">Checking your hunch against what this run actually found&hellip;</p>
+              ) : hunchResult ? (
+                <div className="mt-3">
+                  <span
+                    className={`inline-block rounded px-2.5 py-0.5 text-xs font-bold text-white ${
+                      hunchResult.testable === null
+                        ? "bg-zinc-500"
+                        : !hunchResult.testable
+                          ? "bg-amber-500"
+                          : hunchResult.confirmed
+                            ? "bg-red-600"
+                            : "bg-emerald-600"
+                    }`}
+                  >
+                    {hunchResult.testable === null
+                      ? "COULD NOT EVALUATE"
+                      : !hunchResult.testable
+                        ? "NOT TESTABLE HERE"
+                        : hunchResult.confirmed
+                          ? "CONFIRMED"
+                          : "NOT FOUND"}
+                  </span>
+                  <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{hunchResult.explanation}</p>
+                </div>
+              ) : null}
+            </Card>
+          )}
 
           {probeResult?.screenshot && (
             <Card title="What we actually tested">
