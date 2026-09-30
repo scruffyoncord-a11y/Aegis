@@ -488,6 +488,7 @@ export default function DemoPage() {
           finished={probeFinished}
           onClosed={() => setProbeOverlayOpen(false)}
           onTerminate={() => setProbeOverlayOpen(false)}
+          loaderThroughIndex={0}
         />
       )}
 
@@ -533,11 +534,26 @@ export default function DemoPage() {
               <p className="text-sm text-zinc-600 dark:text-zinc-300">
                 Captured the moment the sandboxed container came up -- proof this ran against a real, live instance, not just its source.
               </p>
-              <img
-                src={probeResult.screenshot}
-                alt="Screenshot of the sandboxed app at the moment it was probed"
-                className="mt-3 w-full rounded-lg border border-zinc-300 dark:border-zinc-700"
-              />
+              <div className="mt-3 flex w-full max-w-xl items-center justify-between rounded-t-lg border border-b-0 border-zinc-300 bg-zinc-100 px-3 py-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-full bg-red-400" />
+                  <span className="h-2.5 w-2.5 rounded-full bg-amber-400" />
+                  <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
+                </div>
+              </div>
+              <a
+                href={probeResult.screenshot}
+                target="_blank"
+                rel="noreferrer"
+                className="block h-72 w-full max-w-xl overflow-hidden rounded-b-lg border border-zinc-300 dark:border-zinc-700"
+                title="Open full size"
+              >
+                <img
+                  src={probeResult.screenshot}
+                  alt="Screenshot of the sandboxed app at the moment it was probed"
+                  className="h-full w-full object-cover object-top"
+                />
+              </a>
             </Card>
           )}
 

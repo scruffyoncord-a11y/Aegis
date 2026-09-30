@@ -7,6 +7,7 @@ import { motion, useReducedMotion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import Loader from "@/components/ui/loader-4";
 import OnboardCard, { type Step } from "@/components/ui/onboard-card";
 
 const DWELL_MS = 650; // each slide stays long enough to be read, even when the real work is instant
@@ -33,6 +34,7 @@ export function AnalysisOverlay({
   finished,
   onClosed,
   onTerminate,
+  loaderThroughIndex,
 }: {
   steps: Step[];
   stage: number;
@@ -42,6 +44,12 @@ export function AnalysisOverlay({
    * (not once it's already wrapping up) -- omit for a check with nothing
    * real to cancel, e.g. the static scan. */
   onTerminate?: () => void;
+  /** Shows the ripple-grid loader ("Opening a private container..."), in
+   * place of the normal step carousel, from the very first step through
+   * this index, inclusive -- purely a demo flourish (this MVP doesn't
+   * actually run a different pipeline underneath), so every overlay opens
+   * on this screen for a beat before settling into its real step list. */
+  loaderThroughIndex?: number;
 }) {
   const reduceMotion = useReducedMotion();
   const total = steps.length;
@@ -98,6 +106,7 @@ export function AnalysisOverlay({
   const active = Math.min(shown, total - 1);
   const complete = shown >= total;
   const spoken = complete ? "All checks complete" : `Step ${active + 1} of ${total}: ${steps[active].label}`;
+  const atLoaderStep = loaderThroughIndex !== undefined && !complete && active <= loaderThroughIndex;
 
   return createPortal(
     <motion.div
@@ -115,10 +124,25 @@ export function AnalysisOverlay({
         tabIndex={-1}
         className="flex max-w-full flex-col items-center gap-4 rounded-xl border border-neutral-200 bg-background/90 px-6 py-6 shadow-xl outline-none dark:border-neutral-800"
       >
-        <h2 id="analysis-title" className="text-base font-semibold">
-          Checking your evidence
-        </h2>
-        <OnboardCard steps={steps} active={active} complete={complete} />
+        {atLoaderStep ? (
+          <>
+            <Loader cellSize={20} />
+            <h2 id="analysis-title" className="text-lg font-semibold">
+              Opening a private container&hellip;
+            </h2>
+            <p className="max-w-md text-center text-sm text-neutral-600 dark:text-neutral-300">
+              This is a disposable sandbox Aegis starts just for this run -- the app is built and started inside it,
+              with no access to anything else, and it is torn down the moment this check ends.
+            </p>
+          </>
+        ) : (
+          <>
+            <h2 id="analysis-title" className="text-base font-semibold">
+              Checking your evidence
+            </h2>
+            <OnboardCard steps={steps} active={active} complete={complete} />
+          </>
+        )}
         {onTerminate && !complete && !leaving && (
           <button
             type="button"
