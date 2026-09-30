@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
+from app.cancellation import Cancelled, finish_run, new_run, request_cancel
 from app.detectors import run_all_detectors
 from app.detectors.secrets import GitleaksNotInstalled
 from app.fixers import fix_and_verify
@@ -40,6 +41,7 @@ from app.probes.agent import NoSupportedEntryPoint, run_active_probes
 from app.probes.idor import IDOR_TOOL
 from app.probes.missing_auth import MISSING_AUTH_TOOL
 from app.probes.supabase_probe import NoSupabaseProject, run_supabase_probe
+from app.repo_tree import build_tree
 from app.sandbox import SandboxBuildError, SandboxUnavailable
 from app.subprojects import find_subprojects
 
@@ -78,26 +80,37 @@ class CloneRequest(BaseModel):
     repo_url: str
 
 
+class CancelRequest(BaseModel):
+    run_id: str
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
 
 
-def _ndjson_stream(fn: Callable[[Callable[[str], None]], dict]) -> StreamingResponse:
+def _ndjson_stream(
+    fn: Callable[[Callable[[str], None]], dict],
+    extra_started: dict[str, Any] | None = None,
+) -> StreamingResponse:
     """Runs fn(progress) in a background thread and reports it as
     newline-delimited JSON events, so the frontend can show real progress
     instead of a spinner with no information behind it.
 
-    Events: {"stage": "started"}, then whatever real stage names fn's own
-    progress() calls emit, then either {"stage": "done", "result": ...} or
-    {"stage": "error", "detail": "..."}. Mirrors Epiderm's own
-    backend/app/main.py::_ndjson_stream (same team, same pattern).
+    Events: {"stage": "started", ...extra_started}, then whatever real stage
+    names fn's own progress() calls emit, then either {"stage": "done",
+    "result": ...} or {"stage": "error", "detail": "..."}. `extra_started`
+    lets a caller (probe_stream) hand the frontend a run id in that first
+    event, before any real work starts -- e.g. so a "Terminate" button has
+    something to cancel from the very first moment it's shown. Mirrors
+    Epiderm's own backend/app/main.py::_ndjson_stream (same team, same
+    pattern).
     """
     events: "queue.Queue[dict | None]" = queue.Queue()
 
     def work() -> None:
         try:
-            events.put({"stage": "started"})
+            events.put({"stage": "started", **(extra_started or {})})
             result = fn(lambda stage: events.put({"stage": stage}))
             events.put({"stage": "done", "result": result})
         except Exception as e:
@@ -143,6 +156,16 @@ def _run_scan(repo_path: str, progress: Callable[[str], None]) -> dict:
     }
 
 
+@app.post("/repo/tree")
+def repo_tree(req: ScanRequest) -> dict:
+    """A shallow, read-only file/folder tree for the "browse the codebase"
+    step between connecting a repo and choosing what to pentest. Never reads
+    file contents -- just names and structure, capped so a huge repo still
+    returns fast (see app/repo_tree.py).
+    """
+    return build_tree(req.repo_path)
+
+
 @app.post("/scan", response_model=ScanResponse)
 def scan(req: ScanRequest) -> ScanResponse:
     try:
@@ -164,16 +187,26 @@ def fix(req: FixRequest) -> dict:
     return result.to_dict()
 
 
-def _run_probe(repo_path: str, progress: Callable[[str], None]) -> dict:
+def _run_probe(
+    repo_path: str,
+    progress: Callable[[str], None],
+    cancel_event: threading.Event | None = None,
+) -> dict:
     """Phase 4-5: AI-hypothesized, sandbox-confirmed active probe.
 
     Slower than /scan (builds and runs a Docker container). Skips cleanly
     (never raises past this point) if Docker, a Dockerfile, or a supported
     entry point isn't available -- the caller is told exactly why, not left
     guessing, and it is reported as "could not check", never as "clean".
+    A user-requested cancel (see app/cancellation.py) is reported the same
+    honest way: "skipped", never as an error and never as "clean".
     """
     try:
-        findings = run_active_probes(repo_path, [MISSING_AUTH_TOOL, IDOR_TOOL], on_stage=progress)
+        findings = run_active_probes(
+            repo_path, [MISSING_AUTH_TOOL, IDOR_TOOL], on_stage=progress, cancel_event=cancel_event
+        )
+    except Cancelled as e:
+        return {"findings": [], "skipped": True, "cancelled": True, "reason": str(e)}
     except NoSupportedEntryPoint:
         # No Express/FastAPI/Flask server to trace -- this is also exactly
         # what a Supabase-backed SPA with no server of its own looks like,
@@ -210,8 +243,32 @@ def probe(req: ScanRequest) -> dict:
 
 @app.post("/probe/stream")
 def probe_stream(req: ScanRequest) -> StreamingResponse:
-    """Same as /probe, reported stage-by-stage as newline-delimited JSON."""
-    return _ndjson_stream(lambda progress: _run_probe(req.repo_path, progress))
+    """Same as /probe, reported stage-by-stage as newline-delimited JSON.
+
+    Mints a run id up front and sends it in the very first ("started")
+    event, so the frontend's "Terminate pentest" button has something to
+    call /probe/cancel with immediately -- not just once some later stage
+    arrives.
+    """
+    run_id, cancel_event = new_run()
+
+    def work(progress: Callable[[str], None]) -> dict:
+        try:
+            return _run_probe(req.repo_path, progress, cancel_event=cancel_event)
+        finally:
+            finish_run(run_id)
+
+    return _ndjson_stream(work, extra_started={"run_id": run_id})
+
+
+@app.post("/probe/cancel")
+def probe_cancel(req: CancelRequest) -> dict:
+    """Signals a running probe to stop. Best-effort and honest about it:
+    the build phase (see sandbox.py) can't be interrupted mid-flight, so a
+    cancel during that window takes effect right after it finishes, not
+    instantly -- everywhere else it stops within one poll interval.
+    """
+    return {"cancelled": request_cancel(req.run_id)}
 
 
 @app.get("/github/oauth/login")

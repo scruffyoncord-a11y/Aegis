@@ -6,8 +6,17 @@ export const API = "http://localhost:8000";
 /** Reads a newline-delimited JSON stream from the backend, calling onStage
  * for every real progress event, and resolving with the final `result` once
  * a {"stage": "done"} line arrives. Throws if the stream reports an error
- * or ends without ever sending one. */
-export async function readStream<T>(res: Response, onStage: (stage: string) => void): Promise<T> {
+ * or ends without ever sending one.
+ *
+ * `onStarted`, if given, gets the full first ("started") event -- not just
+ * its stage name -- so a caller can pick extra fields off it (e.g.
+ * probe/stream's `run_id`, which a "Terminate" button needs before any
+ * later stage has even arrived). */
+export async function readStream<T>(
+  res: Response,
+  onStage: (stage: string) => void,
+  onStarted?: (event: Record<string, unknown>) => void,
+): Promise<T> {
   if (!res.body) throw new Error("The server sent no answer.");
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -24,10 +33,13 @@ export async function readStream<T>(res: Response, onStage: (stage: string) => v
       buffer = buffer.slice(newline + 1);
       newline = buffer.indexOf("\n");
       if (!line) continue;
-      const event = JSON.parse(line) as { stage: string; result?: T; detail?: string };
+      const event = JSON.parse(line) as { stage: string; result?: T; detail?: string; [key: string]: unknown };
       if (event.stage === "error") throw new Error(event.detail ?? "The check failed.");
       if (event.stage === "done") result = event.result;
-      else onStage(event.stage);
+      else {
+        if (event.stage === "started") onStarted?.(event);
+        onStage(event.stage);
+      }
     }
   }
   if (result === undefined) throw new Error("The check ended without a result.");

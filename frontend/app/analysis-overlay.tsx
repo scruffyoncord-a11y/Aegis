@@ -32,11 +32,16 @@ export function AnalysisOverlay({
   stage,
   finished,
   onClosed,
+  onTerminate,
 }: {
   steps: Step[];
   stage: number;
   finished: boolean;
   onClosed: () => void;
+  /** Shows a "Terminate" button while the check is still genuinely running
+   * (not once it's already wrapping up) -- omit for a check with nothing
+   * real to cancel, e.g. the static scan. */
+  onTerminate?: () => void;
 }) {
   const reduceMotion = useReducedMotion();
   const total = steps.length;
@@ -114,6 +119,15 @@ export function AnalysisOverlay({
           Checking your evidence
         </h2>
         <OnboardCard steps={steps} active={active} complete={complete} />
+        {onTerminate && !complete && !leaving && (
+          <button
+            type="button"
+            onClick={onTerminate}
+            className="rounded-lg border border-red-300 px-4 py-1.5 text-sm font-medium text-red-600 transition hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+          >
+            Terminate pentest
+          </button>
+        )}
         <p className="sr-only" role="status" aria-live="polite">
           {spoken}
         </p>

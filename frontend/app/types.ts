@@ -49,4 +49,4 @@ export type RiskSummary = {
 };
 
 export type ScanResponse = { findings: Finding[]; score: number; risk: RiskSummary };
-export type ProbeResponse = { findings: Finding[]; skipped: boolean; reason?: string; score?: number; risk?: RiskSummary };
+export type ProbeResponse = { findings: Finding[]; skipped: boolean; cancelled?: boolean; reason?: string; score?: number; risk?: RiskSummary };

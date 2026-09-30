@@ -12,8 +12,10 @@ anything other than "the repo path Aegis was given".
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable
 
+from app.cancellation import Cancelled
 from app.detectors.routes import detect_and_find_entry, extract_routes
 from app.probes.tool import Tool
 from app.sandbox import SandboxBuildError, SandboxUnavailable, run_sandbox_auto
@@ -39,13 +41,23 @@ def run_active_probes(
     framework: str | None = None,
     container_port: int | None = None,
     on_stage: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
     """Trace once, hypothesize per tool, confirm every tool's candidates
     inside ONE shared sandbox (so a multi-tool run only pays the Docker
     build/start cost once), and return every confirmed finding across tools.
+
+    `cancel_event` backs the "Terminate pentest" button -- checked before
+    tracing, before entering the sandbox, and (mid-sandbox) by run_sandbox
+    itself; see sandbox.py for exactly where a cancel takes effect.
     """
     stage = on_stage or _NOOP_STAGE
 
+    def _check_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise Cancelled("Pentest terminated by user.")
+
+    _check_cancelled()
     stage("tracing")
     if entry_file is None or framework is None:
         found = detect_and_find_entry(repo_path)
@@ -76,12 +88,16 @@ def run_active_probes(
     if not tool_candidates:
         return []
 
+    _check_cancelled()
     stage("sandbox")
     findings: list[dict[str, Any]] = []
     try:
-        with run_sandbox_auto(repo_path, container_port, entry_file=entry_file) as base_url:
+        with run_sandbox_auto(
+            repo_path, container_port, entry_file=entry_file, cancel_event=cancel_event
+        ) as base_url:
             stage("probing")
             for tool, candidates in tool_candidates:
+                _check_cancelled()
                 for candidate in candidates:
                     finding = tool.probe(base_url, candidate, entry_file, framework)
                     if finding is not None:

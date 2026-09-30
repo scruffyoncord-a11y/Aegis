@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -30,6 +31,8 @@ from typing import Iterator
 import docker
 import httpx
 from docker.errors import BuildError, DockerException
+
+from app.cancellation import Cancelled
 
 _READY_TIMEOUT_SECONDS = 20.0
 _READY_POLL_INTERVAL = 0.5
@@ -48,19 +51,35 @@ def has_dockerfile(repo_path: str) -> bool:
 
 
 @contextlib.contextmanager
-def run_sandbox(repo_path: str, container_port: int) -> Iterator[str]:
+def run_sandbox(
+    repo_path: str, container_port: int, cancel_event: threading.Event | None = None
+) -> Iterator[str]:
     """Build + run the target repo's own Dockerfile, yield its base URL.
 
     The container is always removed on exit, even on error. `container_port`
     is the port the app listens on *inside* the container (e.g. 3001) --
     Docker maps it to a random free port on the host, so parallel runs never
     collide.
+
+    `cancel_event` backs the "Terminate pentest" button: checked before the
+    build starts, right after the container comes up, and on every tick of
+    the ready-wait poll, raising Cancelled the moment it's set. The one gap
+    is mid-build -- `client.images.build` is a single blocking call with no
+    clean interrupt point via this API -- so a cancel during the (usually
+    short) build itself takes effect right after that build finishes, not
+    instantly; every other phase stops within one poll interval.
     """
     if not has_dockerfile(repo_path):
         raise SandboxUnavailable(
             f"No Dockerfile in {repo_path!r} -- the active probe needs the "
             "target repo to provide one. Skipping the sandboxed check."
         )
+
+    def _check_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise Cancelled("Pentest terminated by user.")
+
+    _check_cancelled()
 
     try:
         client = docker.from_env()
@@ -79,6 +98,8 @@ def run_sandbox(repo_path: str, container_port: int) -> Iterator[str]:
         except BuildError as e:
             raise SandboxBuildError(f"Docker build failed: {e}") from e
 
+        _check_cancelled()  # the build itself can't be interrupted mid-flight; catch it right after
+
         container = client.containers.run(
             tag,
             detach=True,
@@ -93,7 +114,7 @@ def run_sandbox(repo_path: str, container_port: int) -> Iterator[str]:
         host_port = container.ports[f"{container_port}/tcp"][0]["HostPort"]
         base_url = f"http://127.0.0.1:{host_port}"
 
-        _wait_until_ready(base_url)
+        _wait_until_ready(base_url, cancel_event)
         yield base_url
 
     finally:
@@ -108,7 +129,12 @@ def run_sandbox(repo_path: str, container_port: int) -> Iterator[str]:
             pass
 
 
-def run_sandbox_auto(repo_path: str, container_port: int, entry_file: str | None = None):
+def run_sandbox_auto(
+    repo_path: str,
+    container_port: int,
+    entry_file: str | None = None,
+    cancel_event: threading.Event | None = None,
+):
     """Like run_sandbox, but if the repo has no Dockerfile, tries a
     best-effort model-synthesized one first (see app/dockerfile_inference.py)
     before giving up. A repo-provided Dockerfile always wins outright --
@@ -123,7 +149,7 @@ def run_sandbox_auto(repo_path: str, container_port: int, entry_file: str | None
     base_url:`.
     """
     if has_dockerfile(repo_path):
-        return run_sandbox(repo_path, container_port)
+        return run_sandbox(repo_path, container_port, cancel_event)
 
     from app.dockerfile_inference import infer_dockerfile  # local import: keep the LLM dependency out of sandbox.py's module load unless actually needed
 
@@ -135,12 +161,15 @@ def run_sandbox_auto(repo_path: str, container_port: int, entry_file: str | None
             "Add a Dockerfile to enable the active-probe stage."
         )
     dockerfile_text, inferred_port = inferred
-    return _run_sandbox_with_synthesized_dockerfile(repo_path, dockerfile_text, inferred_port)
+    return _run_sandbox_with_synthesized_dockerfile(repo_path, dockerfile_text, inferred_port, cancel_event)
 
 
 @contextlib.contextmanager
 def _run_sandbox_with_synthesized_dockerfile(
-    repo_path: str, dockerfile_text: str, container_port: int
+    repo_path: str,
+    dockerfile_text: str,
+    container_port: int,
+    cancel_event: threading.Event | None = None,
 ) -> Iterator[str]:
     """Copies the repo to a temp dir (the original is NEVER touched), writes
     the model-synthesized Dockerfile into that copy only, then reuses
@@ -159,16 +188,18 @@ def _run_sandbox_with_synthesized_dockerfile(
             ),
         )
         (work / "Dockerfile").write_text(dockerfile_text, encoding="utf-8")
-        with run_sandbox(str(work), container_port) as base_url:
+        with run_sandbox(str(work), container_port, cancel_event) as base_url:
             yield base_url
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _wait_until_ready(base_url: str) -> None:
+def _wait_until_ready(base_url: str, cancel_event: threading.Event | None = None) -> None:
     deadline = time.time() + _READY_TIMEOUT_SECONDS
     last_error: Exception | None = None
     while time.time() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            raise Cancelled("Pentest terminated by user.")
         try:
             httpx.get(base_url, timeout=2.0)
             return

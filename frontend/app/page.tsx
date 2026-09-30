@@ -137,6 +137,26 @@ function FindingCard({ finding, repoPath }: { finding: Finding; repoPath: string
 }
 
 type Repo = { full_name: string; private: boolean; permission: string; updated_at: string | null };
+type TreeNode = { name: string; path: string; type: "dir" | "file" | "more"; children?: TreeNode[] };
+
+/** A read-only, GitHub-style mini file tree -- <details>/<summary> gives
+ * collapsible folders for free, no extra expand/collapse state to manage. */
+function RepoTree({ node, depth }: { node: TreeNode; depth: number }) {
+  if (node.type === "more") {
+    return <p className="pl-4 text-zinc-500">&hellip; more</p>;
+  }
+  if (node.type === "file") {
+    return <p style={{ paddingLeft: `${depth * 16}px` }}>{node.name}</p>;
+  }
+  return (
+    <details open={depth < 1} style={{ paddingLeft: depth === 0 ? 0 : 16 }}>
+      <summary className="cursor-pointer select-none text-zinc-700 dark:text-zinc-300">{node.name}/</summary>
+      {(node.children ?? []).map((child) => (
+        <RepoTree key={child.path || child.name} node={child} depth={depth + 1} />
+      ))}
+    </details>
+  );
+}
 
 function GitHubConnect({ onConnected }: { onConnected: (path: string) => void }) {
   const [status, setStatus] = useState<{ loading: boolean; connected: boolean; github_login?: string }>({ loading: true, connected: false });
@@ -146,11 +166,14 @@ function GitHubConnect({ onConnected }: { onConnected: (path: string) => void })
   const [cloningRepo, setCloningRepo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cloned, setCloned] = useState<{ owner: string; repo: string; permission: string; private: boolean; subpath: string } | null>(null);
-  // Set right after clone when the repo looks like a monorepo (more than one
-  // candidate service directory) -- holds everything needed to finish
-  // connecting once the user picks which one to point Aegis at.
-  const [choosingSubproject, setChoosingSubproject] = useState<{
-    repo_path: string; owner: string; repo: string; permission: string; private: boolean; subprojects: string[];
+  // Set right after clone succeeds -- holds everything needed to show the
+  // "browse the codebase, then pick what to pentest" step before anything
+  // actually runs. `tree` arrives a beat later (its own fetch), so the
+  // structure step can render immediately with a loading placeholder rather
+  // than blocking on it.
+  const [browsing, setBrowsing] = useState<{
+    repo_path: string; owner: string; repo: string; permission: string; private: boolean;
+    subprojects: string[]; tree: TreeNode | null; treeLoading: boolean;
   } | null>(null);
 
   async function refreshStatus() {
@@ -200,15 +223,12 @@ function GitHubConnect({ onConnected }: { onConnected: (path: string) => void })
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
       const subprojects: string[] = data.subprojects ?? ["."];
-      if (subprojects.length > 1) {
-        // Monorepo -- ask which service to point Aegis at instead of
-        // guessing. Everything else (the connected banner, auto-scan) is
-        // deferred until confirmSubproject runs.
-        setChoosingSubproject({ ...data, subprojects });
-      } else {
-        setCloned({ ...data, subpath: "." });
-        onConnected(data.repo_path);
-      }
+      // Always land on the "browse, then pick what to pentest" step now --
+      // never auto-run. The tree fetch is separate and slower, so this
+      // renders immediately with a loading placeholder rather than making
+      // the whole step wait on it.
+      setBrowsing({ ...data, subprojects, tree: null, treeLoading: true });
+      fetchTree(data.repo_path);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -216,11 +236,25 @@ function GitHubConnect({ onConnected }: { onConnected: (path: string) => void })
     }
   }
 
-  function confirmSubproject(subpath: string) {
-    if (!choosingSubproject) return;
-    const fullPath = subpath === "." ? choosingSubproject.repo_path : `${choosingSubproject.repo_path}/${subpath}`;
-    setCloned({ ...choosingSubproject, subpath });
-    setChoosingSubproject(null);
+  async function fetchTree(repoPath: string) {
+    try {
+      const res = await fetch(`${API}/repo/tree`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo_path: repoPath }),
+      });
+      const tree: TreeNode = await res.json();
+      setBrowsing((prev) => (prev ? { ...prev, tree, treeLoading: false } : prev));
+    } catch {
+      setBrowsing((prev) => (prev ? { ...prev, treeLoading: false } : prev));
+    }
+  }
+
+  function confirmScope(subpath: string) {
+    if (!browsing) return;
+    const fullPath = subpath === "." ? browsing.repo_path : `${browsing.repo_path}/${subpath}`;
+    setCloned({ ...browsing, subpath });
+    setBrowsing(null);
     onConnected(fullPath);
   }
 
@@ -246,26 +280,56 @@ function GitHubConnect({ onConnected }: { onConnected: (path: string) => void })
     );
   }
 
-  if (choosingSubproject) {
+  // Between clicking a repo and the clone finishing: a dedicated verifying
+  // step, not just a busy button -- this can take a few seconds for a
+  // larger repo, and a blank list with a disabled button reads as stuck.
+  if (cloningRepo) {
     return (
-      <Card title="Which part of this repo do you want to test?">
+      <Card title="Connect a GitHub repo">
+        <div className="flex flex-col items-center gap-3 py-10 text-center">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-emerald-500 dark:border-zinc-700" />
+          <p className="text-sm font-medium">Verifying repository ownership&hellip;</p>
+          <p className="text-xs text-zinc-500">Checking push/admin access, then cloning into a disposable sandbox copy.</p>
+        </div>
+      </Card>
+    );
+  }
+
+  if (browsing) {
+    return (
+      <Card title="Your codebase">
         <p className="text-sm text-zinc-600 dark:text-zinc-300">
-          {choosingSubproject.owner}/{choosingSubproject.repo} looks like it has more than one service (e.g. a separate
-          frontend and backend). Aegis sandboxes and probes one service at a time -- pick which directory to point it at.
+          {browsing.owner}/{browsing.repo} &mdash; {browsing.permission} access{browsing.private ? ", private" : ""}.
+          Verified and cloned into a sandbox copy.
         </p>
-        <ul className="mt-3 space-y-1">
-          {choosingSubproject.subprojects.map((sub) => (
+
+        <div className="tg-card mt-3 max-h-64 overflow-y-auto !rounded-lg p-3 font-mono text-xs">
+          {browsing.treeLoading ? (
+            <p className="text-zinc-500">Reading the file tree&hellip;</p>
+          ) : browsing.tree ? (
+            <RepoTree node={browsing.tree} depth={0} />
+          ) : (
+            <p className="text-zinc-500">Could not read the file tree (continuing anyway).</p>
+          )}
+        </div>
+
+        <p className="mt-4 text-sm font-semibold uppercase tracking-wide text-zinc-500">What do you want to pentest?</p>
+        <ul className="mt-2 space-y-1">
+          {browsing.subprojects.map((sub) => (
             <li key={sub}>
               <button
                 type="button"
-                onClick={() => confirmSubproject(sub)}
+                onClick={() => confirmScope(sub)}
                 className="tg-card flex w-full items-center justify-between gap-2 !rounded-lg px-3 py-2 text-left text-sm"
               >
-                <span>{sub === "." ? "Whole repo (root)" : `${sub}/`}</span>
+                <span>{sub === "." ? "Whole app (everything Aegis can reach)" : `${sub}/`}</span>
               </button>
             </li>
           ))}
         </ul>
+        <button type="button" onClick={() => setBrowsing(null)} className="mt-3 text-xs text-zinc-500 underline">
+          Change repo
+        </button>
       </Card>
     );
   }
@@ -369,6 +433,9 @@ export default function Home() {
   const [probeFinished, setProbeFinished] = useState(false);
   const [probeResult, setProbeResult] = useState<ProbeResponse | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
+  // Handed to us in /probe/stream's very first event -- the "Terminate
+  // pentest" button needs it to tell the backend which run to actually stop.
+  const [probeRunId, setProbeRunId] = useState<string | null>(null);
 
   // Both take an optional explicit path so they can be called right after a
   // repo is connected, using the fresh value directly -- calling them via
@@ -405,6 +472,7 @@ export default function Home() {
     setProbeStage(0);
     setProbeFinished(false);
     setProbeError(null);
+    setProbeRunId(null);
     try {
       const res = await fetch(`${API}/probe/stream`, {
         method: "POST",
@@ -412,15 +480,36 @@ export default function Home() {
         body: JSON.stringify({ repo_path: target }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await readStream<ProbeResponse>(res, (s) => {
-        const i = PROBE_STEPS.findIndex((step) => step.key === s);
-        if (i >= 0) setProbeStage((cur) => Math.max(cur, i));
-      });
+      const data = await readStream<ProbeResponse>(
+        res,
+        (s) => {
+          const i = PROBE_STEPS.findIndex((step) => step.key === s);
+          if (i >= 0) setProbeStage((cur) => Math.max(cur, i));
+        },
+        (started) => {
+          if (typeof started.run_id === "string") setProbeRunId(started.run_id);
+        },
+      );
       setProbeResult(data);
     } catch (e) {
       setProbeError(String(e));
     } finally {
       setProbeFinished(true);
+    }
+  }
+
+  // Closes the overlay immediately for instant feedback, and tells the
+  // backend to actually stop -- fire-and-forget from the UI's side, since
+  // handleProbe's own request is still in flight and will resolve on its
+  // own once the backend honors the cancel (see app/cancellation.py).
+  function handleTerminateProbe() {
+    setProbeOverlayOpen(false);
+    if (probeRunId) {
+      fetch(`${API}/probe/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: probeRunId }),
+      }).catch(() => {});
     }
   }
 
@@ -502,6 +591,7 @@ export default function Home() {
           stage={probeStage}
           finished={probeFinished}
           onClosed={() => setProbeOverlayOpen(false)}
+          onTerminate={handleTerminateProbe}
         />
       )}
 
