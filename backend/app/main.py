@@ -40,7 +40,7 @@ from app import risk
 from app.hunch import evaluate_hunch
 from app.llm import explain_finding
 from app.probes.agent import NoSupportedEntryPoint, run_active_probes
-from app.probes.idor import IDOR_TOOL
+from app.probes.idor import build_idor_tool
 from app.probes.missing_auth import MISSING_AUTH_TOOL
 from app.probes.supabase_probe import NoSupabaseProject, run_supabase_probe
 from app.repo_tree import build_tree
@@ -92,6 +92,12 @@ class ProbeRequest(BaseModel):
     # The free-text lead from "Test a Hunch" -- optional, absent for a
     # normal Re-run pentest.
     hint: str | None = None
+    # A real test credential from the user's OWN account on the target app
+    # (e.g. "Bearer eyJhbGci..." or "Cookie: session=..."), used for the
+    # IDOR probe's two test requests instead of Aegis's demo-fixture
+    # convention -- see app/probes/idor.py::build_idor_tool. Optional;
+    # falls back to the demo convention when absent.
+    test_credential: str | None = None
 
 
 class HunchRequest(BaseModel):
@@ -210,6 +216,7 @@ def _run_probe(
     progress: Callable[[str], None],
     cancel_event: threading.Event | None = None,
     user_hint: str | None = None,
+    test_credential: str | None = None,
 ) -> dict:
     """Phase 4-5: AI-hypothesized, sandbox-confirmed active probe.
 
@@ -223,6 +230,10 @@ def _run_probe(
     `user_hint` is "Test a Hunch"'s free-text lead -- passed through to bias
     the hypothesis step (see run_active_probes), not evaluated here; the
     /hunch endpoint judges the hunch against the final findings afterward.
+
+    `test_credential`, if given, is used for the IDOR probe's test requests
+    instead of Aegis's demo-fixture convention -- see
+    app/probes/idor.py::build_idor_tool.
     """
     # Filled in by on_sandbox_ready the moment the container is confirmed
     # live -- a plain dict so the closure below can write into it (Python
@@ -238,7 +249,7 @@ def _run_probe(
     try:
         findings = run_active_probes(
             repo_path,
-            [MISSING_AUTH_TOOL, IDOR_TOOL],
+            [MISSING_AUTH_TOOL, build_idor_tool(test_credential)],
             on_stage=progress,
             cancel_event=cancel_event,
             on_sandbox_ready=capture_screenshot,
@@ -278,7 +289,7 @@ def _run_probe(
 
 @app.post("/probe")
 def probe(req: ProbeRequest) -> dict:
-    return _run_probe(req.repo_path, lambda _stage: None, user_hint=req.hint)
+    return _run_probe(req.repo_path, lambda _stage: None, user_hint=req.hint, test_credential=req.test_credential)
 
 
 @app.post("/probe/stream")
@@ -294,7 +305,13 @@ def probe_stream(req: ProbeRequest) -> StreamingResponse:
 
     def work(progress: Callable[[str], None]) -> dict:
         try:
-            return _run_probe(req.repo_path, progress, cancel_event=cancel_event, user_hint=req.hint)
+            return _run_probe(
+                req.repo_path,
+                progress,
+                cancel_event=cancel_event,
+                user_hint=req.hint,
+                test_credential=req.test_credential,
+            )
         finally:
             finish_run(run_id)
 

@@ -527,6 +527,14 @@ export default function Home() {
   const [hunchResult, setHunchResult] = useState<HunchResult | null>(null);
   const [hunchEvaluating, setHunchEvaluating] = useState(false);
 
+  // A real test credential from the user's OWN account on the target app --
+  // used for the IDOR probe's two test requests instead of Aegis's demo
+  // fixture convention (Bearer demo-valid-token), which only means
+  // anything to Aegis's own test apps. Optional: every probe still runs
+  // fine without one, just against the demo convention as before.
+  const [testCredential, setTestCredential] = useState("");
+  const [credentialFieldOpen, setCredentialFieldOpen] = useState(false);
+
   // Both take an optional explicit path so they can be called right after a
   // repo is connected, using the fresh value directly -- calling them via
   // the repoPath STATE at that point would still see the old value, since
@@ -572,7 +580,7 @@ export default function Home() {
       const res = await fetch(`${API}/probe/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo_path: target, hint: hint ?? null }),
+        body: JSON.stringify({ repo_path: target, hint: hint ?? null, test_credential: testCredential.trim() || null }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await readStream<ProbeResponse>(
@@ -693,11 +701,34 @@ export default function Home() {
               >
                 {probeOverlayOpen ? "Pentesting…" : "Test a Hunch"}
               </button>
+              <button
+                type="button"
+                onClick={() => setCredentialFieldOpen((o) => !o)}
+                title="Optional: a real test-account token/cookie from YOUR OWN app, used for the IDOR check instead of Aegis's demo convention."
+                className="rounded-lg px-2 py-1.5 text-xs text-zinc-500 underline hover:text-zinc-700 dark:hover:text-zinc-300"
+              >
+                {testCredential ? "Test credential set" : "Set test credential"}
+              </button>
             </div>
           )}
           <SandboxBadge state={sandboxState} />
         </div>
       </header>
+
+      {repoConnected && credentialFieldOpen && (
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            value={testCredential}
+            onChange={(e) => setTestCredential(e.target.value)}
+            placeholder='Bearer eyJhbGci... or Cookie: session=... (optional, for a real IDOR check)'
+            className="flex-1 rounded-lg border border-zinc-300 bg-transparent p-2 text-sm dark:border-zinc-700"
+          />
+          <p className="text-xs text-zinc-500">
+            A real logged-in token/cookie from a test account on <em>this app</em> -- lets the IDOR check use your
+            own auth instead of Aegis's demo convention. Never sent anywhere but this app's own sandbox.
+          </p>
+        </div>
+      )}
 
       {hunchModalOpen && <HunchModal onCancel={() => setHunchModalOpen(false)} onSubmit={submitHunch} />}
 
