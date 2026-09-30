@@ -49,4 +49,16 @@ export type RiskSummary = {
 };
 
 export type ScanResponse = { findings: Finding[]; score: number; risk: RiskSummary };
-export type ProbeResponse = { findings: Finding[]; skipped: boolean; cancelled?: boolean; reason?: string; score?: number; risk?: RiskSummary };
+export type ProbeResponse = {
+  findings: Finding[];
+  skipped: boolean;
+  cancelled?: boolean;
+  reason?: string;
+  score?: number;
+  risk?: RiskSummary;
+  /** A data: URL screenshot of the actual sandboxed app, captured the
+   * moment its container came up -- a live "this is what we tested"
+   * preview, best-effort only (absent if capture failed or there was no
+   * sandboxed container at all, e.g. the Supabase-probe fallback path). */
+  screenshot?: string | null;
+};

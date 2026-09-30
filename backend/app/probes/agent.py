@@ -42,6 +42,7 @@ def run_active_probes(
     container_port: int | None = None,
     on_stage: Callable[[str], None] | None = None,
     cancel_event: threading.Event | None = None,
+    on_sandbox_ready: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Trace once, hypothesize per tool, confirm every tool's candidates
     inside ONE shared sandbox (so a multi-tool run only pays the Docker
@@ -50,6 +51,12 @@ def run_active_probes(
     `cancel_event` backs the "Terminate pentest" button -- checked before
     tracing, before entering the sandbox, and (mid-sandbox) by run_sandbox
     itself; see sandbox.py for exactly where a cancel takes effect.
+
+    `on_sandbox_ready`, if given, is called once with the live base_url the
+    moment the sandbox is confirmed up -- this is how main.py hooks in a
+    "what did we actually test" screenshot without this module needing to
+    know anything about screenshots itself. Any exception it raises is
+    swallowed: a preview failing must never break the actual probe.
     """
     stage = on_stage or _NOOP_STAGE
 
@@ -95,6 +102,11 @@ def run_active_probes(
         with run_sandbox_auto(
             repo_path, container_port, entry_file=entry_file, cancel_event=cancel_event
         ) as base_url:
+            if on_sandbox_ready is not None:
+                try:
+                    on_sandbox_ready(base_url)
+                except Exception:
+                    pass
             stage("probing")
             for tool, candidates in tool_candidates:
                 _check_cancelled()

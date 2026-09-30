@@ -13,13 +13,13 @@ import type { Finding, FixResult, ProbeResponse, RiskSummary, ScanResponse } fro
 // Each entry's key must match a real "stage" event name the backend actually
 // emits (see backend/app/main.py::_run_scan / _run_probe) -- the overlay
 // follows real progress, it never fakes a step that isn't really happening.
-const SCAN_STEPS: (Step & { key: string })[] = [
+export const SCAN_STEPS: (Step & { key: string })[] = [
   { key: "started", label: "Request received", detail: "Reading the repo" },
   { key: "detecting", label: "Detecting issues", detail: "Gitleaks, dependency, and config checks" },
   { key: "explaining", label: "Explaining findings", detail: "A local model writes each explanation" },
 ];
 
-const PROBE_STEPS: (Step & { key: string })[] = [
+export const PROBE_STEPS: (Step & { key: string })[] = [
   { key: "started", label: "Request received", detail: "Preparing the active probe" },
   { key: "tracing", label: "Tracing routes", detail: "Mapping the app's routes and middleware" },
   { key: "reasoning", label: "Reasoning about auth", detail: "A local model hypothesizes what's unprotected" },
@@ -28,7 +28,7 @@ const PROBE_STEPS: (Step & { key: string })[] = [
   { key: "explaining", label: "Explaining findings", detail: "A local model writes each explanation" },
 ];
 
-const SEVERITY_STYLE: Record<string, string> = {
+export const SEVERITY_STYLE: Record<string, string> = {
   critical: "bg-red-600 text-white",
   high: "bg-orange-500 text-white",
   medium: "bg-amber-400 text-zinc-900",
@@ -39,7 +39,7 @@ const SEVERITY_STYLE: Record<string, string> = {
  * dashboard view, the same way Epiderm combines a message + its attachment:
  * each stage becomes a `part`, and the worse verdict of the two governs the
  * overall picture shown at the top. */
-function mergeRisk(scanRisk: RiskSummary | null, probeRisk: RiskSummary | null): RiskSummary | null {
+export function mergeRisk(scanRisk: RiskSummary | null, probeRisk: RiskSummary | null): RiskSummary | null {
   if (!scanRisk && !probeRisk) return null;
   const parts = [];
   if (scanRisk) parts.push({ name: "Static scan (secrets, deps, config)", risk_score: scanRisk.risk_score, verdict: scanRisk.verdict });
@@ -57,7 +57,17 @@ function mergeRisk(scanRisk: RiskSummary | null, probeRisk: RiskSummary | null):
   return { ...base, areas, matrix, suspicious, reassuring, parts };
 }
 
-function FindingCard({ finding, repoPath }: { finding: Finding; repoPath: string }) {
+export function FindingCard({
+  finding,
+  repoPath,
+  fixOverride,
+}: {
+  finding: Finding;
+  repoPath: string;
+  /** When given, used INSTEAD of the real /fix call -- this is what lets
+   * the demo page reuse this exact component with no real backend at all. */
+  fixOverride?: (finding: Finding) => Promise<FixResult>;
+}) {
   const [fixing, setFixing] = useState(false);
   const [fix, setFix] = useState<FixResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -66,6 +76,10 @@ function FindingCard({ finding, repoPath }: { finding: Finding; repoPath: string
     setFixing(true);
     setError(null);
     try {
+      if (fixOverride) {
+        setFix(await fixOverride(finding));
+        return;
+      }
       const res = await fetch(`${API}/fix`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -136,12 +150,12 @@ function FindingCard({ finding, repoPath }: { finding: Finding; repoPath: string
   );
 }
 
-type Repo = { full_name: string; private: boolean; permission: string; updated_at: string | null };
-type TreeNode = { name: string; path: string; type: "dir" | "file" | "more"; children?: TreeNode[] };
+export type Repo = { full_name: string; private: boolean; permission: string; updated_at: string | null };
+export type TreeNode = { name: string; path: string; type: "dir" | "file" | "more"; children?: TreeNode[] };
 
 /** A read-only, GitHub-style mini file tree -- <details>/<summary> gives
  * collapsible folders for free, no extra expand/collapse state to manage. */
-function RepoTree({ node, depth }: { node: TreeNode; depth: number }) {
+export function RepoTree({ node, depth }: { node: TreeNode; depth: number }) {
   if (node.type === "more") {
     return <p className="pl-4 text-zinc-500">&hellip; more</p>;
   }
@@ -604,6 +618,19 @@ export default function Home() {
       {combinedRisk && (
         <div className="mt-6 space-y-6">
           <RiskDashboard risk={combinedRisk} />
+
+          {probeResult?.screenshot && (
+            <Card title="What we actually tested">
+              <p className="text-sm text-zinc-600 dark:text-zinc-300">
+                Captured the moment the sandboxed container came up -- proof this ran against a real, live instance, not just its source.
+              </p>
+              <img
+                src={probeResult.screenshot}
+                alt="Screenshot of the sandboxed app at the moment it was probed"
+                className="mt-3 w-full rounded-lg border border-zinc-300 dark:border-zinc-700"
+              />
+            </Card>
+          )}
 
           {allFindings.length > 0 ? (
             <div className="space-y-3">

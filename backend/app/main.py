@@ -9,6 +9,7 @@ Run with:
 
 from __future__ import annotations
 
+import base64
 import json
 import queue
 import threading
@@ -43,6 +44,7 @@ from app.probes.missing_auth import MISSING_AUTH_TOOL
 from app.probes.supabase_probe import NoSupabaseProject, run_supabase_probe
 from app.repo_tree import build_tree
 from app.sandbox import SandboxBuildError, SandboxUnavailable
+from app.screenshot import take_screenshot
 from app.subprojects import find_subprojects
 
 SESSION_COOKIE = "aegis_session"
@@ -201,9 +203,24 @@ def _run_probe(
     A user-requested cancel (see app/cancellation.py) is reported the same
     honest way: "skipped", never as an error and never as "clean".
     """
+    # Filled in by on_sandbox_ready the moment the container is confirmed
+    # live -- a plain dict so the closure below can write into it (Python
+    # closures can't assign to an outer local directly). Stays empty for the
+    # Supabase-probe fallback path, which has no sandboxed container at all.
+    screenshot: dict[str, str] = {}
+
+    def capture_screenshot(base_url: str) -> None:
+        png = take_screenshot(base_url)
+        if png:
+            screenshot["data_url"] = "data:image/png;base64," + base64.b64encode(png).decode()
+
     try:
         findings = run_active_probes(
-            repo_path, [MISSING_AUTH_TOOL, IDOR_TOOL], on_stage=progress, cancel_event=cancel_event
+            repo_path,
+            [MISSING_AUTH_TOOL, IDOR_TOOL],
+            on_stage=progress,
+            cancel_event=cancel_event,
+            on_sandbox_ready=capture_screenshot,
         )
     except Cancelled as e:
         return {"findings": [], "skipped": True, "cancelled": True, "reason": str(e)}
@@ -233,6 +250,7 @@ def _run_probe(
         "skipped": False,
         "score": risk.score(findings),
         "risk": risk.summarise(findings, ["Access Control"]),
+        "screenshot": screenshot.get("data_url"),
     }
 
 

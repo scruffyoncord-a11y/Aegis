@@ -16,3 +16,8 @@ google-genai
 
 # Phase 4-5: sandboxed active probe
 docker
+
+# Live "what did we actually test" screenshot of the sandboxed app -- best
+# effort only (see app/screenshot.py); needs its own browser binary too:
+#   playwright install chromium
+playwright
