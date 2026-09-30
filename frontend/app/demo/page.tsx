@@ -263,7 +263,7 @@ export default function DemoPage() {
   const sandboxState: SandboxState = probeOverlayOpen ? "opening" : probeResult ? "active" : "standby";
 
   return (
-    <main className="mx-auto max-w-5xl px-5 py-10">
+    <main className="w-full px-10 py-10">
       <div className="no-print mb-4 flex items-center justify-between rounded-lg border border-amber-400 bg-amber-50 px-4 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
         <span>
           <strong>Demo mode</strong> -- every screen below is mocked. No GitHub, no clone, no Docker, no Ollama call happens on this page.

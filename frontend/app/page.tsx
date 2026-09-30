@@ -551,7 +551,7 @@ export default function Home() {
         : "standby";
 
   return (
-    <main className="mx-auto max-w-5xl px-5 py-10">
+    <main className="w-full px-10 py-10">
       <SandboxBadge state={sandboxState} />
 
       <h1 className="text-3xl font-bold">Aegis</h1>
