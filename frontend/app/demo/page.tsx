@@ -202,9 +202,6 @@ export default function DemoPage() {
   const [probeFinished, setProbeFinished] = useState(false);
   const [probeResult, setProbeResult] = useState<ProbeResponse | null>(null);
 
-  const [expectedScore, setExpectedScore] = useState(80);
-  const [allowCritical, setAllowCritical] = useState(false);
-
   async function playStages(
     steps: { key: string }[],
     setStage: (i: number) => void,
@@ -265,11 +262,6 @@ export default function DemoPage() {
   const allFindings: Finding[] = [...(scanResult?.findings ?? []), ...(probeResult?.findings ?? [])];
   const sandboxState: SandboxState = probeOverlayOpen ? "opening" : probeResult ? "active" : "standby";
 
-  const hasCritical = allFindings.some((f) => f.severity === "critical");
-  const meetsScore = combinedRisk ? combinedRisk.security_score >= expectedScore : null;
-  const meetsCritical = allowCritical || !hasCritical;
-  const verdict: "good" | "bad" | null = combinedRisk ? (meetsScore && meetsCritical ? "good" : "bad") : null;
-
   return (
     <main className="w-full px-10 py-10">
       <div className="no-print mb-4 flex items-center justify-between rounded-lg border border-amber-400 bg-amber-50 px-4 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
@@ -288,7 +280,29 @@ export default function DemoPage() {
             AI pentesting agent -- Observe &rarr; Detect &rarr; Explain &rarr; Respond
           </p>
         </div>
-        <SandboxBadge state={sandboxState} />
+        <div className="flex items-center gap-3">
+          {connected && (
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={runScan}
+                disabled={scanOverlayOpen}
+                className="rounded-lg border border-zinc-300 px-4 py-1.5 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              >
+                {scanOverlayOpen ? "Scanning…" : "Re-scan"}
+              </button>
+              <button
+                type="button"
+                onClick={runProbe}
+                disabled={probeOverlayOpen}
+                className="rounded-lg bg-zinc-900 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
+              >
+                {probeOverlayOpen ? "Pentesting…" : "Re-run pentest"}
+              </button>
+            </div>
+          )}
+          <SandboxBadge state={sandboxState} />
+        </div>
       </header>
 
       <div className="mt-6">
@@ -360,63 +374,6 @@ export default function DemoPage() {
         )}
       </div>
 
-      {connected && (
-        <div className="mt-4 flex flex-col gap-3">
-          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-zinc-300 p-3 text-sm dark:border-zinc-700">
-            <span className="font-semibold text-zinc-700 dark:text-zinc-200">Your bar for &ldquo;good&rdquo;:</span>
-            <label className="flex items-center gap-1.5 text-zinc-600 dark:text-zinc-300">
-              score &ge;
-              <input
-                type="number"
-                min={0}
-                max={100}
-                value={expectedScore}
-                onChange={(e) => setExpectedScore(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
-                className="w-16 rounded border border-zinc-300 bg-transparent px-2 py-1 text-center dark:border-zinc-700"
-              />
-            </label>
-            <label className="flex items-center gap-1.5 text-zinc-600 dark:text-zinc-300">
-              <input type="checkbox" checked={!allowCritical} onChange={(e) => setAllowCritical(!e.target.checked)} />
-              no critical findings
-            </label>
-
-            <div className="ml-auto flex gap-2">
-              <button
-                type="button"
-                onClick={runScan}
-                disabled={scanOverlayOpen}
-                className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:opacity-50"
-              >
-                {scanOverlayOpen ? "Scanning…" : "Re-scan"}
-              </button>
-              <button
-                type="button"
-                onClick={runProbe}
-                disabled={probeOverlayOpen}
-                className="rounded-lg bg-fuchsia-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-fuchsia-500 disabled:opacity-50"
-              >
-                {probeOverlayOpen ? "Pentesting…" : "Re-run pentest"}
-              </button>
-            </div>
-          </div>
-
-          {verdict && combinedRisk && (
-            <div
-              className={`rounded-lg border px-4 py-3 text-sm font-semibold ${
-                verdict === "good"
-                  ? "border-emerald-400 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-200"
-                  : "border-red-400 bg-red-50 text-red-800 dark:border-red-700 dark:bg-red-950 dark:text-red-200"
-              }`}
-            >
-              {verdict === "good"
-                ? `GOOD — score ${combinedRisk.security_score} meets your bar (>= ${expectedScore}${allowCritical ? "" : ", no critical findings"}).`
-                : `BAD — ${!meetsScore ? `score ${combinedRisk.security_score} is below your bar of ${expectedScore}` : ""}${
-                    !meetsScore && !meetsCritical ? ", and " : ""
-                  }${!meetsCritical ? "a critical finding is present" : ""}.`}
-            </div>
-          )}
-        </div>
-      )}
 
       {scanOverlayOpen && (
         <AnalysisOverlay
