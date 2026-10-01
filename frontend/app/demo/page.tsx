@@ -23,6 +23,7 @@ import {
   PROBE_STEPS,
   RepoTree,
   SCAN_STEPS,
+  bySeverity,
   mergeRisk,
   type Repo,
   type TreeNode,
@@ -558,13 +559,15 @@ export default function DemoPage() {
           )}
 
           {allFindings.length > 0 && (
-            <div className="space-y-3">
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-600 dark:text-zinc-300">
+            <div>
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-600 dark:text-zinc-300">
                 {allFindings.length} finding{allFindings.length === 1 ? "" : "s"}
               </h2>
-              {allFindings.map((f, i) => (
-                <FindingCard key={`${f.type}-${i}`} finding={f} repoPath={DEMO_REPO_PATH} fixOverride={mockFix} />
-              ))}
+              <div className="tg-card divide-y divide-zinc-200 overflow-hidden !rounded-lg dark:divide-zinc-800">
+                {bySeverity(allFindings).map((f, i) => (
+                  <FindingCard key={`${f.type}-${i}`} finding={f} repoPath={DEMO_REPO_PATH} fixOverride={mockFix} />
+                ))}
+              </div>
             </div>
           )}
 

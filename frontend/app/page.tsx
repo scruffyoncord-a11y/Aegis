@@ -35,6 +35,19 @@ export const SEVERITY_STYLE: Record<string, string> = {
   low: "bg-zinc-500 text-white",
 };
 
+// Worst first -- used to sort the findings list, not just style a badge.
+const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+export function bySeverity(findings: Finding[]): Finding[] {
+  return [...findings].sort((a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9));
+}
+
+const SEVERITY_BORDER: Record<string, string> = {
+  critical: "border-l-red-600",
+  high: "border-l-orange-500",
+  medium: "border-l-amber-400",
+  low: "border-l-zinc-500",
+};
+
 /** Combines /scan and /probe's independent RiskSummary responses into one
  * dashboard view, the same way Epiderm combines a message + its attachment:
  * each stage becomes a `part`, and the worse verdict of the two governs the
@@ -95,58 +108,65 @@ export function FindingCard({
   }
 
   return (
-    <Card
-      title={finding.type}
-      aside={
-        <span className={`rounded px-2 py-0.5 text-xs font-bold uppercase ${SEVERITY_STYLE[finding.severity] ?? "bg-zinc-500 text-white"}`}>
-          {finding.severity}
-        </span>
-      }
-    >
-      <p className="text-sm font-medium text-zinc-800 dark:text-zinc-100">{finding.match}</p>
-      <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{finding.explanation}</p>
-
-      {finding.evidence && (
-        <div className="mt-3 rounded-lg border border-zinc-300 bg-zinc-100 p-3 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900">
-          <div className="text-zinc-600 dark:text-zinc-400">{finding.evidence.request}</div>
-          <div className="mt-1 font-semibold text-orange-600 dark:text-orange-400">
-            → {finding.evidence.response_status} response, real data returned
-          </div>
-          <div className="mt-1 text-zinc-500 dark:text-zinc-500">{finding.evidence.response_body}</div>
-        </div>
-      )}
-
-      {!fix && (
-        <button
-          type="button"
-          onClick={handleFix}
-          disabled={fixing}
-          className="mt-3 rounded-lg bg-fuchsia-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-fuchsia-500 disabled:opacity-50"
-        >
-          {fixing ? "Fixing…" : "Fix"}
-        </button>
-      )}
-      {error && <p className="mt-2 text-sm text-red-500">Error: {error}</p>}
-
-      {fix && (
-        <div className="mt-3">
-          <span
-            className={`inline-block rounded px-2.5 py-0.5 text-xs font-bold text-white ${fix.verified ? "bg-emerald-600" : "bg-red-600"}`}
-          >
-            {fix.verified ? "VERIFIED FIXED" : "NOT VERIFIED"}
+    <details className={`group border-l-4 ${SEVERITY_BORDER[finding.severity] ?? "border-l-zinc-500"}`}>
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-2.5 hover:bg-zinc-100 dark:hover:bg-zinc-800/60">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className={`shrink-0 rounded px-2 py-0.5 text-xs font-bold uppercase ${SEVERITY_STYLE[finding.severity] ?? "bg-zinc-500 text-white"}`}>
+            {finding.severity}
           </span>
-          <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{fix.note}</p>
-          {Object.entries(fix.diffs).map(([path, diff]) => (
-            <div key={path} className="mt-2">
-              <div className="text-xs text-zinc-500">{path}</div>
-              <pre className="mt-1 overflow-x-auto rounded-lg border border-zinc-300 bg-zinc-100 p-3 text-xs dark:border-zinc-700 dark:bg-zinc-900">
-                {diff}
-              </pre>
-            </div>
-          ))}
+          <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{finding.type}</span>
+          <span className="truncate text-sm text-zinc-700 dark:text-zinc-300">{finding.match}</span>
         </div>
-      )}
-    </Card>
+        <div className="flex shrink-0 items-center gap-3">
+          {finding.file && <span className="hidden text-xs text-zinc-500 dark:text-zinc-400 sm:inline">{finding.file}</span>}
+          <span className="text-zinc-400 transition group-open:rotate-90 dark:text-zinc-500">&rsaquo;</span>
+        </div>
+      </summary>
+      <div className="border-t border-zinc-200 px-4 py-3 dark:border-zinc-800">
+        <p className="text-sm text-zinc-700 dark:text-zinc-300">{finding.explanation}</p>
+
+        {finding.evidence && (
+          <div className="mt-3 rounded-lg border border-zinc-300 bg-zinc-100 p-3 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900">
+            <div className="text-zinc-600 dark:text-zinc-400">{finding.evidence.request}</div>
+            <div className="mt-1 font-semibold text-orange-600 dark:text-orange-400">
+              → {finding.evidence.response_status} response, real data returned
+            </div>
+            <div className="mt-1 text-zinc-500 dark:text-zinc-500">{finding.evidence.response_body}</div>
+          </div>
+        )}
+
+        {!fix && (
+          <button
+            type="button"
+            onClick={handleFix}
+            disabled={fixing}
+            className="mt-3 rounded-lg bg-zinc-900 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
+          >
+            {fixing ? "Fixing…" : "Fix"}
+          </button>
+        )}
+        {error && <p className="mt-2 text-sm text-red-500">Error: {error}</p>}
+
+        {fix && (
+          <div className="mt-3">
+            <span
+              className={`inline-block rounded px-2.5 py-0.5 text-xs font-bold text-white ${fix.verified ? "bg-emerald-600" : "bg-red-600"}`}
+            >
+              {fix.verified ? "VERIFIED FIXED" : "NOT VERIFIED"}
+            </span>
+            <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{fix.note}</p>
+            {Object.entries(fix.diffs).map(([path, diff]) => (
+              <div key={path} className="mt-2">
+                <div className="text-xs text-zinc-500">{path}</div>
+                <pre className="mt-1 overflow-x-auto rounded-lg border border-zinc-300 bg-zinc-100 p-3 text-xs dark:border-zinc-700 dark:bg-zinc-900">
+                  {diff}
+                </pre>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -827,13 +847,15 @@ export default function Home() {
           )}
 
           {allFindings.length > 0 ? (
-            <div className="space-y-3">
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-600 dark:text-zinc-300">
+            <div>
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-600 dark:text-zinc-300">
                 {allFindings.length} finding{allFindings.length === 1 ? "" : "s"}
               </h2>
-              {allFindings.map((f, i) => (
-                <FindingCard key={i} finding={f} repoPath={repoPath} />
-              ))}
+              <div className="tg-card divide-y divide-zinc-200 overflow-hidden !rounded-lg dark:divide-zinc-800">
+                {bySeverity(allFindings).map((f, i) => (
+                  <FindingCard key={i} finding={f} repoPath={repoPath} />
+                ))}
+              </div>
             </div>
           ) : (
             <p className="text-emerald-600 dark:text-emerald-400">No findings. Clean scan.</p>

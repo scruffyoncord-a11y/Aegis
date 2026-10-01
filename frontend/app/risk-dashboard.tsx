@@ -27,6 +27,18 @@ function riskColor(value: number): string {
   return value >= 70 ? "bg-red-500" : value >= 40 ? "bg-amber-500" : value > 0 ? "bg-yellow-400" : "bg-zinc-600";
 }
 
+// Area scores are the OPPOSITE sense of riskColor's matrix weights: 100 here
+// means "fully clean", not "high risk" -- so this is a real color scale
+// (red at 0 -> green at 100), not a step function, and ends at the exact
+// color for this value no matter the bar's own rendered width (the
+// background-size trick below scales the fixed-domain gradient so its
+// right edge always lands at `value`).
+const SCORE_GRADIENT = "linear-gradient(90deg, rgb(239,68,68) 0%, rgb(245,158,11) 50%, rgb(16,185,129) 100%)";
+function scoreGradientStyle(value: number): { backgroundImage: string; backgroundSize: string } {
+  const v = Math.max(1, Math.min(100, value));
+  return { backgroundImage: SCORE_GRADIENT, backgroundSize: `${10000 / v}% 100%` };
+}
+
 /** Counts from 0 up to the target once, so the score "lands" when the result appears. */
 function useCountUp(target: number, instant: boolean): number {
   const [value, setValue] = useState(0);
@@ -126,7 +138,8 @@ function AreaBars({ risk, reduce }: { risk: RiskSummary; reduce: boolean }) {
           </div>
           <div className="mt-1 h-2.5 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
             <motion.div
-              className={`h-full rounded-full ${riskColor(a.risk)}`}
+              className="h-full rounded-full"
+              style={a.risk > 0 ? scoreGradientStyle(a.risk) : { background: "rgb(82, 82, 91)" }}
               initial={{ width: 0 }}
               animate={{ width: `${Math.max(a.risk, a.risk > 0 ? 3 : 0)}%` }}
               transition={{ duration: reduce ? 0 : 0.8, delay: reduce ? 0 : 0.15 + i * 0.08 }}
