@@ -107,14 +107,29 @@ fix is reported "resolved" until a fresh re-check verifies it.
 
 ### Architecture grounding
 
-The split between deterministic scoring, an AI **reasoning** step, and a
-separate AI **explanation** step is deliberate, not incidental. It follows
-the same principle established by PentestGPT (Deng et al., *USENIX Security
-2024*) — that a single LLM run end-to-end loses track of the overall
-testing goal over a long session. Aegis keeps the three jobs strictly
-separate: `risk.py`'s fixed rules decide severity and score, Qwen2.5-Coder
-only proposes what to check, and Gemma3 only explains a finding *after*
-its severity is already decided — it can never raise or lower anything.
+Aegis's design leans on two existing references rather than guessing at
+what an "AI pentest agent" should look like from scratch:
+
+- **PentestGPT** (Deng et al., *USENIX Security 2024*) — their benchmark
+  found that a single LLM run end-to-end loses track of the overall
+  testing goal over a long session: it forgets earlier findings and
+  overweights whatever it saw most recently. Their fix was splitting the
+  agent into separate roles instead of one giant prompt. Aegis applies
+  that same principle to its own three-way split: `risk.py`'s fixed rules
+  decide severity and score, **Qwen2.5-Coder** only proposes what to
+  check, and **Gemma3** only explains a finding *after* its severity is
+  already decided — it can never raise or lower anything. Aegis also
+  reuses PentestGPT-legacy's multi-provider LLM connector directly as a
+  library (see [Installation, step 4](#step-by-step-installation)).
+- **AIDA**'s agent loop — "reason about the target, pick a tool, run it,
+  record why" — is the shape behind `app/probes/agent.py`'s orchestrator:
+  trace the target once, let each registered `Tool` reason independently,
+  then confirm every tool's candidates inside one shared sandbox. Aegis
+  scopes this down hard versus a general agent loop: the tools are a
+  small, fixed set Aegis ships with (`app/probes/tool.py`), never an
+  open-ended command executor, and every tool's probe is a single safe,
+  read-only, no-credential request against a repo the caller already
+  proved they own.
 
 ### Documentation links
 
@@ -371,8 +386,9 @@ OBSERVE  ->  DETECT  ->  EXPLAIN  ->  RESPOND
 - [x] **Agent + tool registry** (`app/probes/agent.py`, `tool.py`): traces
       the target once, lets each registered `Tool` reason independently,
       then confirms every tool's candidates inside one shared, disposable
-      Docker sandbox — the same "reason, pick, run, record" shape PentestGPT
-      uses, scoped down hard: a small fixed tool set, never an open-ended
+      Docker sandbox — the same "reason, pick, run, record" shape AIDA's
+      agent loop uses (see [Architecture grounding](#architecture-grounding)),
+      scoped down hard: a small fixed tool set, never an open-ended
       command executor
 - [x] **Missing-auth tool**: traces routes for ones that look sensitive but
       have no auth attached, confirms with one unauthenticated request
