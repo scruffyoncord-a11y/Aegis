@@ -46,7 +46,17 @@ that shaped the design).
 
 - **Demo video script (4 min):** [`demo-video-script.md`](demo-video-script.md)
 - **Live in-app demo mode** (no GitHub, no Docker, no Ollama required): run the frontend and open `/demo`
-- Screenshots: see the dashboard, risk-by-area gradient bars, and the sandbox-opening flow described in the demo script above — add rendered screenshots/GIFs here before submission
+
+| | |
+|---|---|
+| ![Dashboard: security score, risk-by-area gradient bars, risk matrix, evidence mix, and biggest findings](docs/screenshots/dashboard.jpg) | ![Opening a private container: the disposable Docker sandbox loading state](docs/screenshots/sandbox-opening.jpg) |
+| Full dashboard — score, risk-by-area (green at 100, red toward 0), risk matrix, evidence mix | The sandbox-opening state shown the instant an active probe starts |
+| ![A confirmed IDOR finding showing the real request/response evidence](docs/screenshots/finding-evidence.png) | ![Test a Hunch modal: type a suspicion, see what's testable](docs/screenshots/test-a-hunch.png) |
+| A confirmed finding with its actual request/response evidence, not an inferred guess | "Test a Hunch" — bias the probe toward a specific suspicion |
+
+![Docker Desktop's own build history, independent proof the sandbox is a real build](docs/screenshots/docker-build-proof.png)
+
+Docker Desktop's own build history — independent confirmation the active probe's sandbox step is a real container build, not simulated.
 
 ---
 
